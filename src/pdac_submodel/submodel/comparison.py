@@ -599,7 +599,7 @@ def run_comparison(
         fit_distributions,
     )
 
-    from maple.core.calibration.parameter_groups import load_parameter_groups
+    from qsp_inference.submodel.parameter_groups import load_parameter_groups
 
     priors_csv = Path(priors_csv)
     submodel_dir = Path(submodel_dir)
@@ -823,7 +823,7 @@ def run_comparison(
             # Find relevant parameter groups for this component
             comp_groups = None
             if param_groups:
-                from maple.core.calibration.parameter_groups import (
+                from qsp_inference.submodel.parameter_groups import (
                     ParameterGroupsConfig,
                 )
 

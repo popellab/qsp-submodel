@@ -145,7 +145,7 @@ def plot_inference_dag(
         _find_components_lightweight,
         _lightweight_parse,
     )
-    from maple.core.calibration.parameter_groups import load_parameter_groups
+    from qsp_inference.submodel.parameter_groups import load_parameter_groups
 
     param_groups = load_parameter_groups(submodel_dir / "parameter_groups.yaml")
     if not param_groups.cascade_cuts:

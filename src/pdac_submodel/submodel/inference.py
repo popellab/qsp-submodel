@@ -27,7 +27,7 @@ from typing import Optional
 
 import numpy as np
 
-from maple.core.calibration.parameter_groups import ParameterGroupsConfig
+from qsp_inference.submodel.parameter_groups import ParameterGroupsConfig
 from maple.core.calibration.submodel_target import SubmodelTarget
 from qsp_inference.submodel.utils import (
     STRUCTURED_ALGEBRAIC_TYPES,

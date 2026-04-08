@@ -49,7 +49,7 @@ from typing import Optional
 import numpy as np
 from scipy import stats
 
-from maple.core.calibration.parameter_groups import load_parameter_groups
+from qsp_inference.submodel.parameter_groups import load_parameter_groups
 from maple.core.calibration.submodel_target import SubmodelTarget
 
 
