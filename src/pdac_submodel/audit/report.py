@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parameter coverage audit for PDAC QSP model.
+"""Parameter coverage audit for QSP models.
 
 Auto-detects available data and reports:
 - Stage 0: Prior coverage, submodel target coverage, PRCC-weighted priority
@@ -7,8 +7,8 @@ Auto-detects available data and reports:
 - Stage 2: NPE posterior shifts vs submodel posteriors (when SBI results exist)
 
 Usage:
-    python scripts/parameter_audit.py
-    python scripts/parameter_audit.py --output notes/calibration/parameter_audit_report.md
+    python -m qsp_inference.audit.report --project-root /path/to/project
+    python -m qsp_inference.audit.report --project-root . --output report.md
 """
 
 import argparse
@@ -20,21 +20,50 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic")
 import json
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from qsp_inference.audit.plots import plot_inference_dag, plot_marginals, plot_ppc_histograms
 
-ROOT = Path(__file__).resolve().parent.parent
-PRIORS_CSV = ROOT / "parameters" / "pdac_priors.csv"
-CROSS_MODEL_CSV = ROOT / "parameters" / "cross_model_parameters.csv"
-SUBMODEL_DIR = ROOT / "calibration_targets" / "submodel_targets"
-PARAM_GROUPS = SUBMODEL_DIR / "parameter_groups.yaml"
-PRCC_CSV = ROOT / "results" / "prcc_sensitivity" / "aggregate_parameter_ranking.csv"
-COMPARE_RESULTS = SUBMODEL_DIR / "compare_inference_results.yaml"
-COMPARE_CACHE = SUBMODEL_DIR / ".compare_cache"
-SBI_DIR = ROOT / "figures"
+
+@dataclass
+class AuditConfig:
+    """Paths configuration for the parameter audit report.
+
+    All paths are resolved relative to project_root if not absolute.
+    """
+
+    project_root: Path
+    priors_csv: Path | None = None
+    cross_model_csv: Path | None = None
+    submodel_dir: Path | None = None
+    param_groups: Path | None = None
+    prcc_csv: Path | None = None
+    compare_cache: Path | None = None
+    sbi_dir: Path | None = None
+    model_names: list[str] = field(
+        default_factory=lambda: ["TNBC", "CRC", "UM", "NSCLC", "HCC", "PDAC"]
+    )
+
+    def __post_init__(self):
+        root = Path(self.project_root).resolve()
+        self.project_root = root
+        if self.priors_csv is None:
+            self.priors_csv = root / "parameters" / "pdac_priors.csv"
+        if self.cross_model_csv is None:
+            self.cross_model_csv = root / "parameters" / "cross_model_parameters.csv"
+        if self.submodel_dir is None:
+            self.submodel_dir = root / "calibration_targets" / "submodel_targets"
+        if self.param_groups is None:
+            self.param_groups = self.submodel_dir / "parameter_groups.yaml"
+        if self.prcc_csv is None:
+            self.prcc_csv = root / "results" / "prcc_sensitivity" / "aggregate_parameter_ranking.csv"
+        if self.compare_cache is None:
+            self.compare_cache = self.submodel_dir / ".compare_cache"
+        if self.sbi_dir is None:
+            self.sbi_dir = root / "figures"
 
 
 # ---------------------------------------------------------------------------
@@ -119,16 +148,16 @@ def load_prcc(path: Path) -> dict:
     return rankings
 
 
-def load_cross_model(path: Path) -> dict:
-    """Load cross_model_parameters.csv → {prior_name: {TNBC, CRC, ..., ref_name}}.
+def load_cross_model(path: Path, model_names: list[str] | None = None) -> dict:
+    """Load cross_model_parameters.csv → {prior_name: {model: value, ..., ref_name}}.
 
-    Uses the ``alias`` column to map xlsx parameter names to pdac_priors.csv
+    Uses the ``alias`` column to map xlsx parameter names to priors CSV
     names.  When an alias is present the entry is keyed by the alias (i.e. the
     current prior name); the original xlsx name is stored as ``ref_name``.
     """
     if not path.exists():
         return {}
-    models = ["TNBC", "CRC", "UM", "NSCLC", "HCC", "PDAC"]
+    models = model_names or ["TNBC", "CRC", "UM", "NSCLC", "HCC", "PDAC"]
     result = {}
     with open(path) as f:
         reader = csv.DictReader(f)
@@ -593,16 +622,16 @@ def _section_extraction_priority(scored, groups, targets, cross_model):
     return lines
 
 
-def _section_target_health(priors, targets, compare_results, output_dir, joint_samples):
+def _section_target_health(priors, targets, compare_results, output_dir, joint_samples, submodel_dir=None):
     """Section 2: Are my existing targets working?"""
     import math
 
     lines = ["---\n", "## Are my existing targets working?\n"]
 
     # Inference DAG
-    if output_dir:
+    if output_dir and submodel_dir:
         fig_dir = output_dir / "parameter_audit_report_files"
-        dag_path = plot_inference_dag(SUBMODEL_DIR, fig_dir)
+        dag_path = plot_inference_dag(submodel_dir, fig_dir)
         if dag_path:
             rel = dag_path.relative_to(output_dir)
             lines.append("### Inference DAG\n")
@@ -1016,6 +1045,7 @@ def generate_report(
     comp_diags: list | None = None,
     output_dir: Path | None = None,
     cross_model: dict | None = None,
+    submodel_dir: Path | None = None,
 ) -> str:
     n_total = len(priors)
     n_covered = sum(1 for p in priors if p in targets)
@@ -1024,7 +1054,7 @@ def generate_report(
     lines = []
     lines.extend(_section_header(n_covered, n_total, bool(prcc)))
     lines.extend(_section_extraction_priority(scored, groups, targets, cross_model))
-    lines.extend(_section_target_health(priors, targets, compare_results, output_dir, joint_samples))
+    lines.extend(_section_target_health(priors, targets, compare_results, output_dir, joint_samples, submodel_dir=submodel_dir))
     lines.extend(_section_component_diagnostics(comp_diags))
     lines.extend(_section_whats_left(priors, targets, groups, prcc, sbi_runs))
     lines.extend(_section_cross_model(priors, targets, compare_results, cross_model))
@@ -1036,29 +1066,96 @@ def generate_report(
 # ---------------------------------------------------------------------------
 
 
-def _run_inference(invalidate_params=None):
-    """Run maple run_comparison to generate/update results YAML."""
+def _run_inference(config: AuditConfig, invalidate_params=None):
+    """Run component-wise inference to generate/update cached results."""
     from qsp_inference.submodel.comparison import run_comparison
 
     if invalidate_params:
         print(f"Invalidating components containing: {invalidate_params}")
     print("Running inference comparison...")
     run_comparison(
-        priors_csv=str(PRIORS_CSV),
-        submodel_dir=str(SUBMODEL_DIR),
+        priors_csv=str(config.priors_csv),
+        submodel_dir=str(config.submodel_dir),
         num_samples=4000,
         invalidate_params=invalidate_params,
     )
     print("Done.")
 
 
+def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params=None) -> str:
+    """Run the full audit pipeline and return the report as a string.
+
+    Args:
+        config: Paths configuration.
+        output: Optional path to write the markdown report.
+        invalidate_params: Optional list of parameter names to invalidate
+            in the inference cache before re-running.
+
+    Returns:
+        The generated markdown report.
+    """
+    _run_inference(config, invalidate_params=invalidate_params)
+
+    priors = load_priors(config.priors_csv)
+    targets = load_submodel_targets(config.submodel_dir)
+    groups = load_parameter_groups(config.param_groups)
+    prcc = load_prcc(config.prcc_csv)
+    cross_model = load_cross_model(config.cross_model_csv, model_names=config.model_names)
+    compare_results = load_compare_results(config.compare_cache, priors=priors)
+    sbi_runs = find_sbi_posteriors(config.sbi_dir)
+
+    joint_samples = load_joint_samples(config.compare_cache)
+    if joint_samples:
+        print(f"Loaded joint samples for {len(joint_samples)} parameters")
+
+    comp_diags = load_component_diagnostics(config.compare_cache)
+    if comp_diags:
+        print(f"Loaded diagnostics for {len(comp_diags)} components")
+
+    output_dir = output.parent if output else None
+
+    report = generate_report(
+        priors, targets, groups, prcc, compare_results, sbi_runs,
+        joint_samples=joint_samples,
+        comp_diags=comp_diags,
+        output_dir=output_dir,
+        cross_model=cross_model,
+        submodel_dir=config.submodel_dir,
+    )
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(report)
+        print(f"Report written to {output}")
+
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description="Parameter coverage audit")
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Project root directory (default: current directory)",
+    )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
         help="Output markdown file (default: print to stdout)",
+    )
+    parser.add_argument(
+        "--priors-csv",
+        type=Path,
+        default=None,
+        help="Path to priors CSV (default: <root>/parameters/pdac_priors.csv)",
+    )
+    parser.add_argument(
+        "--submodel-dir",
+        type=Path,
+        default=None,
+        help="Path to submodel targets directory",
     )
     parser.add_argument(
         "--invalidate",
@@ -1068,39 +1165,15 @@ def main():
     )
     args = parser.parse_args()
 
-    _run_inference(invalidate_params=args.invalidate)
-
-    priors = load_priors(PRIORS_CSV)
-    targets = load_submodel_targets(SUBMODEL_DIR)
-    groups = load_parameter_groups(PARAM_GROUPS)
-    prcc = load_prcc(PRCC_CSV)
-    cross_model = load_cross_model(CROSS_MODEL_CSV)
-    compare_results = load_compare_results(COMPARE_CACHE, priors=priors)
-    sbi_runs = find_sbi_posteriors(SBI_DIR)
-
-    joint_samples = load_joint_samples(COMPARE_CACHE)
-    if joint_samples:
-        print(f"Loaded joint samples for {len(joint_samples)} parameters")
-
-    comp_diags = load_component_diagnostics(COMPARE_CACHE)
-    if comp_diags:
-        print(f"Loaded diagnostics for {len(comp_diags)} components")
-
-    output_dir = args.output.parent if args.output else None
-
-    report = generate_report(
-        priors, targets, groups, prcc, compare_results, sbi_runs,
-        joint_samples=joint_samples,
-        comp_diags=comp_diags,
-        output_dir=output_dir,
-        cross_model=cross_model,
+    config = AuditConfig(
+        project_root=args.project_root,
+        priors_csv=args.priors_csv,
+        submodel_dir=args.submodel_dir,
     )
 
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(report)
-        print(f"Report written to {args.output}")
-    else:
+    report = run_audit(config, output=args.output, invalidate_params=args.invalidate)
+
+    if not args.output:
         print(report)
 
 
