@@ -561,7 +561,7 @@ def sync_submodel_priors(
 ) -> list[dict]:
     """Glob submodel target YAMLs, process each, and merge into priors CSV.
 
-    Also loads parameter_groups.yaml from submodel_dir if present.
+    Also loads submodel_config.yaml from submodel_dir if present.
     Note: parameter groups are only applied during joint inference
     (process_targets), not during per-target sync. The sync pipeline
     processes targets individually for fast validation.
@@ -569,8 +569,8 @@ def sync_submodel_priors(
     Returns the list of successfully processed result dicts.
     """
     yaml_files = sorted(submodel_dir.glob(glob_pattern))
-    # Exclude parameter_groups.yaml from target list
-    yaml_files = [f for f in yaml_files if f.name != "parameter_groups.yaml"]
+    # Exclude submodel_config.yaml from target list
+    yaml_files = [f for f in yaml_files if f.name != "submodel_config.yaml"]
     if not yaml_files:
         if verbose:
             print(f"  No submodel target YAMLs matching {glob_pattern} in {submodel_dir}")
@@ -641,7 +641,7 @@ def process_targets(
         output_dir: Where to write submodel_priors.yaml and plots
         plot: Whether to generate diagnostic plots
         export_csv: Optional path to write updated CSV
-        parameter_groups_path: Optional path to parameter_groups.yaml for hierarchical pooling
+        parameter_groups_path: Optional path to submodel_config.yaml for hierarchical pooling
         **mcmc_kwargs: Passed to run_joint_inference (num_warmup, num_samples, etc.)
 
     Returns:
