@@ -1008,7 +1008,7 @@ def run_comparison(
                             entry["obs_ci95"] = ppc_obs_ci[obs_idx]
                         # Prior predictive samples + CI
                         pp = prior_preds_all[obs_idx]
-                        pp_valid = [v for v in pp if np.isfinite(v) and v > 0]
+                        pp_valid = [v for v in pp if np.isfinite(v)]
                         if len(pp_valid) >= 10:
                             entry["prior_median"] = float(np.median(pp_valid))
                             entry["prior_ci95"] = [
@@ -1017,7 +1017,7 @@ def run_comparison(
                             ]
                             entry["prior_samples"] = [float(v) for v in pp_valid]
                         # Posterior predictive samples + CI
-                        preds_valid = [v for v in preds if np.isfinite(v) and v > 0]
+                        preds_valid = [v for v in preds if np.isfinite(v)]
                         if len(preds_valid) >= 10:
                             lo, hi = np.percentile(preds_valid, [2.5, 97.5])
                             entry["post_median"] = float(np.median(preds_valid))
@@ -1034,7 +1034,7 @@ def run_comparison(
                             else:  # normal
                                 obs_samps = rng.normal(fit_med, fit_param, size=n_ppc)
                             obs_samps_valid = [
-                                float(v) for v in obs_samps if np.isfinite(v) and v > 0
+                                float(v) for v in obs_samps if np.isfinite(v)
                             ]
                             if obs_samps_valid:
                                 entry["obs_samples"] = obs_samps_valid
