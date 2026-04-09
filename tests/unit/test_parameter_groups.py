@@ -317,7 +317,7 @@ def test_load_parameter_groups_from_yaml():
 
 def test_resolve_base_prior_from_csv():
     """base_prior=None derives from CSV priors of members."""
-    from maple.core.calibration.submodel_inference import PriorSpec
+    from qsp_inference.submodel.inference import PriorSpec
 
     group = ParameterGroup(
         group_id="test",
@@ -382,7 +382,7 @@ def test_hierarchical_sampling_produces_grouped_params():
     """Verify that hierarchical groups produce correlated parameter samples."""
     from unittest.mock import patch
 
-    from maple.core.calibration.submodel_inference import PriorSpec, run_joint_inference
+    from qsp_inference.submodel.inference import PriorSpec, run_joint_inference
     from maple.core.calibration.submodel_target import SubmodelTarget
 
     # Two grouped params, one with a submodel target anchoring it
@@ -539,7 +539,7 @@ def test_hierarchical_sampling_produces_grouped_params():
 def test_non_grouped_params_unaffected():
     """Non-grouped params should sample independently, same as before."""
 
-    from maple.core.calibration.submodel_inference import PriorSpec, run_joint_inference
+    from qsp_inference.submodel.inference import PriorSpec, run_joint_inference
 
     groups = ParameterGroupsConfig(
         groups=[
