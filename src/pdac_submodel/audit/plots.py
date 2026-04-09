@@ -147,7 +147,7 @@ def plot_inference_dag(
     )
     from qsp_inference.submodel.parameter_groups import load_parameter_groups
 
-    param_groups = load_parameter_groups(submodel_dir / "parameter_groups.yaml")
+    param_groups = load_parameter_groups(submodel_dir / "submodel_config.yaml")
     if not param_groups.cascade_cuts:
         return None
 

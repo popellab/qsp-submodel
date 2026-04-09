@@ -581,7 +581,7 @@ def run_comparison(
         submodel_dir: Directory containing SubmodelTarget YAMLs.
         glob_pattern: Glob for YAML files.
         num_samples: Number of posterior samples per component.
-        parameter_groups_path: Optional path to parameter_groups.yaml.
+        parameter_groups_path: Optional path to submodel_config.yaml.
         invalidate_params: Optional list of parameter names. Any cached
             component containing at least one of these parameters will be
             deleted and re-run.
@@ -609,7 +609,7 @@ def run_comparison(
     if parameter_groups_path is not None:
         param_groups = load_parameter_groups(Path(parameter_groups_path))
     else:
-        auto_path = submodel_dir / "parameter_groups.yaml"
+        auto_path = submodel_dir / "submodel_config.yaml"
         if auto_path.exists():
             param_groups = load_parameter_groups(auto_path)
     if param_groups and param_groups.groups:
@@ -620,8 +620,8 @@ def run_comparison(
         )
 
     yaml_files = sorted(submodel_dir.glob(glob_pattern))
-    # Exclude parameter_groups.yaml from target list
-    yaml_files = [f for f in yaml_files if f.name != "parameter_groups.yaml"]
+    # Exclude submodel_config.yaml from target list
+    yaml_files = [f for f in yaml_files if f.name != "submodel_config.yaml"]
     if not yaml_files:
         return f"No YAML files found matching {glob_pattern} in {submodel_dir}"
 
@@ -845,9 +845,17 @@ def run_comparison(
 
             has_ode = any(t.calibration.forward_model.type == "custom_ode" for t in comp_targets)
 
+            # Check for per-target inference method overrides
+            use_method = None
+            if param_groups:
+                comp_target_ids = [t.target_id for t in comp_targets]
+                use_method = param_groups.get_inference_method_for_targets(comp_target_ids)
+
+            use_npe = has_ode if use_method is None else (use_method == "npe")
+
             try:
-                if has_ode:
-                    # NPE for ODE components only (gives SBC diagnostics)
+                if use_npe:
+                    # NPE for ODE components (gives SBC diagnostics)
                     from qsp_inference.submodel.inference import (
                         run_component_npe,
                     )
@@ -1000,7 +1008,7 @@ def run_comparison(
                             entry["obs_ci95"] = ppc_obs_ci[obs_idx]
                         # Prior predictive samples + CI
                         pp = prior_preds_all[obs_idx]
-                        pp_valid = [v for v in pp if np.isfinite(v) and v > 0]
+                        pp_valid = [v for v in pp if np.isfinite(v)]
                         if len(pp_valid) >= 10:
                             entry["prior_median"] = float(np.median(pp_valid))
                             entry["prior_ci95"] = [
@@ -1009,7 +1017,7 @@ def run_comparison(
                             ]
                             entry["prior_samples"] = [float(v) for v in pp_valid]
                         # Posterior predictive samples + CI
-                        preds_valid = [v for v in preds if np.isfinite(v) and v > 0]
+                        preds_valid = [v for v in preds if np.isfinite(v)]
                         if len(preds_valid) >= 10:
                             lo, hi = np.percentile(preds_valid, [2.5, 97.5])
                             entry["post_median"] = float(np.median(preds_valid))
@@ -1026,7 +1034,7 @@ def run_comparison(
                             else:  # normal
                                 obs_samps = rng.normal(fit_med, fit_param, size=n_ppc)
                             obs_samps_valid = [
-                                float(v) for v in obs_samps if np.isfinite(v) and v > 0
+                                float(v) for v in obs_samps if np.isfinite(v)
                             ]
                             if obs_samps_valid:
                                 entry["obs_samples"] = obs_samps_valid
@@ -1260,7 +1268,7 @@ def main():
     parser.add_argument("--output", help="Optional output file (markdown)")
     parser.add_argument(
         "--parameter-groups",
-        help="Path to parameter_groups.yaml (auto-discovered in submodel-dir if not set)",
+        help="Path to submodel_config.yaml (auto-discovered in submodel-dir if not set)",
     )
     args = parser.parse_args()
 

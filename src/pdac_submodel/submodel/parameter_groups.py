@@ -18,13 +18,13 @@ Usage::
 
     from qsp_inference.submodel.parameter_groups import load_parameter_groups
 
-    groups = load_parameter_groups(Path("parameter_groups.yaml"))
+    groups = load_parameter_groups(Path("submodel_config.yaml"))
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -230,8 +230,23 @@ class CascadeCut(BaseModel):
     )
 
 
+class TargetOverride(BaseModel):
+    """Per-target inference method override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_id: str = Field(description="Target ID to override")
+    inference_method: Literal["nuts", "npe"] = Field(
+        description="Inference method to use for the component containing this target",
+    )
+    reason: str = Field(
+        default="",
+        description="Why this override was made (documentation only)",
+    )
+
+
 class ParameterGroupsConfig(BaseModel):
-    """Top-level config for parameter_groups.yaml."""
+    """Top-level config for submodel_config.yaml."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -244,6 +259,12 @@ class ParameterGroupsConfig(BaseModel):
         description="Parameter bridges to sever between components. "
         "Each cut splits a mega-component and propagates the upstream "
         "posterior as the downstream prior for that parameter.",
+    )
+    component_overrides: list[TargetOverride] = Field(
+        default_factory=list,
+        description="Per-target inference method overrides. "
+        "If any target in a component has an override, that method is used. "
+        "Conflicting overrides within a component raise an error.",
     )
 
     @model_validator(mode="after")
@@ -312,6 +333,22 @@ class ParameterGroupsConfig(BaseModel):
                 return cut.upstream
         return []
 
+    def get_inference_method_for_targets(self, target_ids: list[str]) -> Optional[str]:
+        """Return forced inference method if any target has an override.
+
+        Raises ValueError if targets in the same component have conflicting overrides.
+        """
+        methods = {}
+        for override in self.component_overrides:
+            if override.target_id in target_ids:
+                methods[override.target_id] = override.inference_method
+        unique = set(methods.values())
+        if len(unique) > 1:
+            raise ValueError(
+                f"Conflicting inference method overrides in component: {methods}"
+            )
+        return unique.pop() if unique else None
+
 
 # =============================================================================
 # Loader
@@ -319,10 +356,10 @@ class ParameterGroupsConfig(BaseModel):
 
 
 def load_parameter_groups(yaml_path: Path) -> ParameterGroupsConfig:
-    """Load and validate parameter_groups.yaml.
+    """Load and validate submodel_config.yaml.
 
     Args:
-        yaml_path: Path to parameter_groups.yaml
+        yaml_path: Path to submodel_config.yaml
 
     Returns:
         Validated ParameterGroupsConfig

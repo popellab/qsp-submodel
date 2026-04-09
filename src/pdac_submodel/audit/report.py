@@ -57,7 +57,7 @@ class AuditConfig:
         if self.submodel_dir is None:
             self.submodel_dir = root / "calibration_targets" / "submodel_targets"
         if self.param_groups is None:
-            self.param_groups = self.submodel_dir / "parameter_groups.yaml"
+            self.param_groups = self.submodel_dir / "submodel_config.yaml"
         if self.prcc_csv is None:
             self.prcc_csv = root / "results" / "prcc_sensitivity" / "aggregate_parameter_ranking.csv"
         if self.compare_cache is None:
@@ -116,7 +116,7 @@ def load_submodel_targets(submodel_dir: Path) -> dict:
 
 
 def load_parameter_groups(path: Path) -> dict:
-    """Load parameter_groups.yaml → {param_name: group_id}."""
+    """Load submodel_config.yaml → {param_name: group_id}."""
     if not path.exists():
         return {}
     with open(path) as f:
