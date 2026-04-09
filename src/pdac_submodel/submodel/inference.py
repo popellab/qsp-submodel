@@ -1629,6 +1629,8 @@ def run_component_npe(
     # Posterior predictive
     ppc_post = np.full((n_ppc, len(forward_fns)), np.nan)
     for i in range(n_ppc):
+        if (i + 1) % 5 == 0 or i == n_ppc - 1:
+            print(f"\r  PPC: {i + 1}/{n_ppc} posterior draws", end="", flush=True)
         param_dict = {pname: float(post_samples[i, j]) for j, pname in enumerate(qsp_params)}
         for nname, nspec in nuisance_specs.items():
             param_dict[nname] = float(rng.lognormal(nspec["mu"], nspec["sigma"]))
@@ -1637,6 +1639,7 @@ def run_component_npe(
                 ppc_post[i, obs_idx] = float(fn(param_dict))
             except Exception:
                 pass
+    print(flush=True)
 
     # Prior predictive (use first n_ppc training sims)
     ppc_prior = np.exp(log_x[:n_ppc]).astype(np.float64)
