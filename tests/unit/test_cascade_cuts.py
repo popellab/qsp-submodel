@@ -271,3 +271,89 @@ def test_cleanup_orphaned_caches(tmp_path):
     for comp in active:
         h = _compute_hash("\n".join(sorted(comp["params"])))
         assert (cache_dir / f"comp_{h}.json").exists()
+
+
+# =============================================================================
+# Orphan rescue (targets whose QSP params are all cascade-cut)
+# =============================================================================
+
+
+def test_orphan_target_rescued_when_all_params_cascade_cut():
+    """A target whose QSP params are ALL cascade-cut should still appear in a component."""
+    from qsp_inference.submodel.comparison import _find_components_lightweight
+
+    # Target D has only cascade-cut params — BFS never starts from them
+    lightweight = [
+        {"target_id": "A", "qsp_params": {"P", "X"}, "filename": "A.yaml"},
+        {"target_id": "D", "qsp_params": {"P", "Q"}, "filename": "D.yaml"},
+    ]
+
+    comps = _find_components_lightweight(
+        lightweight, None, cascade_cut_params=frozenset({"P", "Q"})
+    )
+    active = [c for c in comps if c["target_filenames"]]
+
+    # D should be rescued into its own component
+    d_comp = [c for c in active if "D.yaml" in c["target_filenames"]]
+    assert len(d_comp) == 1
+    assert d_comp[0]["params"] == {"P", "Q"}
+
+
+def test_orphan_rescue_does_not_duplicate_assigned_targets():
+    """Targets already assigned via BFS should not get a second component."""
+    from qsp_inference.submodel.comparison import _find_components_lightweight
+
+    lightweight = [
+        {"target_id": "A", "qsp_params": {"P", "X"}, "filename": "A.yaml"},
+        {"target_id": "B", "qsp_params": {"X", "Y"}, "filename": "B.yaml"},
+    ]
+
+    comps = _find_components_lightweight(
+        lightweight, None, cascade_cut_params=frozenset({"P"})
+    )
+    active = [c for c in comps if c["target_filenames"]]
+
+    # A is reachable via X (non-cascade), so it shouldn't be orphaned
+    a_comps = [c for c in active if "A.yaml" in c["target_filenames"]]
+    assert len(a_comps) == 1
+
+
+# =============================================================================
+# Duplicate-edge in_degree fix
+# =============================================================================
+
+
+def test_dag_with_two_cascade_cuts_same_edge():
+    """Two cascade cuts creating the same upstream→downstream edge should not cause a false cycle."""
+    from qsp_inference.submodel.comparison import (
+        _build_stage_dag,
+        _find_components_lightweight,
+    )
+
+    # Upstream target U has params {P1, P2} (both cascade-cut)
+    # Downstream target D has params {P1, P2, X}
+    # Both cuts create edge: comp(U) → comp(D)
+    lightweight = [
+        {"target_id": "U", "qsp_params": {"P1", "P2"}, "filename": "U.yaml"},
+        {"target_id": "D", "qsp_params": {"P1", "P2", "X"}, "filename": "D.yaml"},
+    ]
+
+    comps = _find_components_lightweight(
+        lightweight, None, cascade_cut_params=frozenset({"P1", "P2"})
+    )
+    active = [c for c in comps if c["target_filenames"]]
+
+    cuts = [
+        CascadeCut(parameter="P1", upstream=["U"]),
+        CascadeCut(parameter="P2", upstream=["U"]),
+    ]
+
+    # Should NOT raise a cycle error
+    stages, edges = _build_stage_dag(active, cuts, lightweight)
+
+    assert len(stages) == 2
+    # U in stage 0, D in stage 1
+    u_comp = next(i for i, c in enumerate(active) if "U.yaml" in c["target_filenames"])
+    d_comp = next(i for i, c in enumerate(active) if "D.yaml" in c["target_filenames"])
+    assert u_comp in stages[0]
+    assert d_comp in stages[1]
