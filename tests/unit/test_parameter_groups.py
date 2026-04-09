@@ -357,7 +357,7 @@ def test_resolve_base_prior_explicit():
 
 def test_load_missing_file_returns_empty():
     """Missing file returns empty config (no error)."""
-    config = load_parameter_groups(Path("/nonexistent/parameter_groups.yaml"))
+    config = load_parameter_groups(Path("/nonexistent/submodel_config.yaml"))
     assert config.groups == []
     assert config.all_grouped_params == set()
 
