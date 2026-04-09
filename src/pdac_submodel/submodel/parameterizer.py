@@ -72,6 +72,9 @@ def _build_marginal_cdf(fit: DistFit):
     elif fit.name == "invgamma":
         shape, scale = fit.params["shape"], fit.params["scale"]
         return lambda x: stats.invgamma.cdf(x, shape, scale=scale)
+    elif fit.name == "normal":
+        mu, sigma = fit.params["mu"], fit.params["sigma"]
+        return lambda x: stats.norm.cdf(x, loc=mu, scale=sigma)
     else:
         raise ValueError(f"Unknown distribution: {fit.name}")
 
