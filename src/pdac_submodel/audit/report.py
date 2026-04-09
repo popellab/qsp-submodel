@@ -1110,11 +1110,32 @@ def _write_submodel_priors(
 
     marginals = fit_marginals(output_samples)
 
-    # Build copula
+    # Build copula block-diagonally.  Parameters from different inference
+    # components are independent (inferred separately) so their correlation
+    # is exactly 0.  Group by sample length as a proxy for component
+    # membership — same-length samples are paired MCMC/NPE draws.
     if len(param_names) > 1:
-        samples_matrix = np.column_stack([output_samples[n] for n in param_names])
-        marginal_cdfs = [_build_marginal_cdf(marginals[n]) for n in param_names]
-        R = fit_gaussian_copula(samples_matrix, marginal_cdfs)
+        from collections import defaultdict
+
+        size_groups: dict[int, list[str]] = defaultdict(list)
+        for n in param_names:
+            size_groups[len(output_samples[n])].append(n)
+
+        name_to_idx = {n: i for i, n in enumerate(param_names)}
+        R = np.eye(len(param_names))
+
+        for group_names in size_groups.values():
+            if len(group_names) < 2:
+                continue
+            block_matrix = np.column_stack(
+                [output_samples[n] for n in group_names]
+            )
+            block_cdfs = [_build_marginal_cdf(marginals[n]) for n in group_names]
+            R_block = fit_gaussian_copula(block_matrix, block_cdfs)
+            for bi, ni in enumerate(group_names):
+                for bj, nj in enumerate(group_names):
+                    R[name_to_idx[ni], name_to_idx[nj]] = R_block[bi, bj]
+
         R_thresh, copula_params = threshold_copula(R, param_names, copula_threshold)
     else:
         R_thresh = np.array([[1.0]])

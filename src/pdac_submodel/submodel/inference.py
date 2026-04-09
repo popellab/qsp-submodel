@@ -1186,10 +1186,11 @@ def run_joint_inference(
         kernel,
         num_warmup=num_warmup,
         num_samples=num_samples,
-        progress_bar=False,
+        progress_bar=True,
         num_chains=num_chains,
         chain_method="vectorized",
     )
+    print("  JIT compiling model...", end="", flush=True)
     t0 = _time.perf_counter()
     mcmc.run(
         jax.random.PRNGKey(seed),
@@ -1198,7 +1199,7 @@ def run_joint_inference(
         parameter_groups=parameter_groups,
     )
     elapsed = _time.perf_counter() - t0
-    print(f"MCMC done in {elapsed:.1f}s")
+    print(f"\rMCMC done in {elapsed:.1f}s" + " " * 20)
 
     # Diagnostics
     mcmc.print_summary()

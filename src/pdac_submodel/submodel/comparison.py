@@ -313,6 +313,19 @@ def _find_components_lightweight(
 
         components.append({"params": comp_params, "target_filenames": sorted(comp_filenames)})
 
+    # Rescue orphaned targets whose QSP params are ALL cascade-cut.
+    # These targets never get reached by BFS (cascade params are skipped as
+    # seeds and don't propagate), so they need their own singleton component.
+    assigned_fnames = set()
+    for comp in components:
+        assigned_fnames.update(comp["target_filenames"])
+    for lt in lightweight_targets:
+        fname = lt["filename"]
+        if fname not in assigned_fnames:
+            # All QSP params must be cascade-cut (otherwise BFS would have found it)
+            comp_params = set(lt["qsp_params"])
+            components.append({"params": comp_params, "target_filenames": [fname]})
+
     return components
 
 
@@ -396,8 +409,9 @@ def _build_stage_dag(
         }
 
         for dci in downstream_cis:
+            if dci not in adj[upstream_ci]:
+                in_degree[dci] = in_degree.get(dci, 0) + 1
             adj[upstream_ci].add(dci)
-            in_degree[dci] = in_degree.get(dci, 0) + 1
 
     # Warn if multiple cascade params share the same upstream component —
     # their posterior correlation will be lost (each gets an independent
