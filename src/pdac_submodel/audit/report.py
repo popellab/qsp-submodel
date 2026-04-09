@@ -1062,6 +1062,110 @@ def generate_report(
 
 
 # ---------------------------------------------------------------------------
+# Submodel priors export
+# ---------------------------------------------------------------------------
+
+
+def _write_submodel_priors(
+    joint_samples: dict[str, list],
+    targets: dict[str, list[str]],
+    groups: dict[str, str],
+    output_path: Path,
+    copula_threshold: float = 0.05,
+) -> None:
+    """Write submodel_priors.yaml from cached joint posterior samples.
+
+    Uses fit_marginals and fit_gaussian_copula from the parameterizer module
+    but avoids loading SubmodelTarget Pydantic objects.
+
+    Args:
+        joint_samples: {param_name: list[float]} from load_joint_samples
+        targets: {param_name: [target_ids]} from load_submodel_targets
+        groups: {param_name: group_id} from load_parameter_groups
+        output_path: Where to write submodel_priors.yaml
+        copula_threshold: Minimum |correlation| to include in copula
+    """
+    import numpy as np
+
+    from qsp_inference.submodel.parameterizer import (
+        _build_marginal_cdf,
+        fit_gaussian_copula,
+        fit_marginals,
+        threshold_copula,
+        write_priors_yaml,
+    )
+
+    # Filter to non-nuisance, non-hyperparameter samples
+    output_samples = {
+        k: np.asarray(v)
+        for k, v in joint_samples.items()
+        if k in targets and "__" not in k
+    }
+
+    if not output_samples:
+        print("No posterior samples to parameterize — skipping submodel_priors.yaml")
+        return
+
+    param_names = sorted(output_samples.keys())
+
+    marginals = fit_marginals(output_samples)
+
+    # Build copula
+    if len(param_names) > 1:
+        samples_matrix = np.column_stack([output_samples[n] for n in param_names])
+        marginal_cdfs = [_build_marginal_cdf(marginals[n]) for n in param_names]
+        R = fit_gaussian_copula(samples_matrix, marginal_cdfs)
+        R_thresh, copula_params = threshold_copula(R, param_names, copula_threshold)
+    else:
+        R_thresh = np.array([[1.0]])
+        copula_params = []
+
+    # Assemble result
+    parameters = []
+    for name in param_names:
+        fit = marginals[name]
+        entry = {
+            "name": name,
+            "marginal": {
+                "distribution": fit.name,
+                **fit.params,
+                "median": float(fit.median),
+                "cv": float(fit.cv),
+            },
+        }
+        if name in targets:
+            entry["source_targets"] = targets[name]
+        if name in groups:
+            entry["group"] = groups[name]
+        parameters.append(entry)
+
+    copula_block = None
+    if copula_params:
+        indices = [param_names.index(p) for p in copula_params]
+        R_sub = R_thresh[np.ix_(indices, indices)]
+        copula_block = {
+            "type": "gaussian",
+            "parameters": copula_params,
+            "correlation": R_sub.tolist(),
+        }
+
+    n_samples = len(next(iter(output_samples.values())))
+    result = {
+        "metadata": {
+            "generated_by": "qsp_inference.audit.report",
+            "n_parameters": len(param_names),
+            "n_samples": n_samples,
+        },
+        "parameters": parameters,
+    }
+    if copula_block:
+        result["copula"] = copula_block
+
+    write_priors_yaml(result, output_path)
+    print(f"Submodel priors written to {output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1127,6 +1231,11 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report)
         print(f"Report written to {output}")
+
+    # Generate submodel_priors.yaml from joint posterior samples
+    if joint_samples:
+        priors_yaml_path = (output.parent if output else Path.cwd()) / "submodel_priors.yaml"
+        _write_submodel_priors(joint_samples, targets, groups, priors_yaml_path)
 
     return report
 
