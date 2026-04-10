@@ -414,6 +414,76 @@ def load_joint_samples(cache_dir: Path) -> dict | None:
     return all_samples if all_samples else None
 
 
+def export_posterior_medians(cache_dir: Path) -> dict:
+    """Export posterior medians from component cache files.
+
+    Reads all comp_*.json in *cache_dir*, filters out nuisance parameters
+    (sigma_*, *__z, *__base), and computes the median of each QSP
+    parameter's posterior samples.
+
+    Returns a dict suitable for JSON serialization::
+
+        {
+            "_meta": {
+                "generated_at": "2026-04-10T...",
+                "source_hash": "a1b2c3...",
+                "n_params": 189,
+            },
+            "medians": {"param_name": float_value, ...},
+        }
+
+    The source_hash is a SHA-256 digest (16 hex chars) of the cache file
+    contents, allowing downstream consumers to detect staleness.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    import numpy as np
+
+    all_samples = load_joint_samples(cache_dir)
+    if not all_samples:
+        raise FileNotFoundError(
+            f"No posterior samples found in {cache_dir}. "
+            "Run parameter audit first: python scripts/parameter_audit.py"
+        )
+
+    # Filter nuisance params
+    def _is_qsp_param(name: str) -> bool:
+        if name.startswith("sigma_"):
+            return False
+        if name.endswith("__z"):
+            return False
+        if "__base" in name:
+            return False
+        return True
+
+    medians = {}
+    for pname, samps in sorted(all_samples.items()):
+        if not _is_qsp_param(pname):
+            continue
+        arr = np.array(samps, dtype=float)
+        pos = arr[arr > 0]
+        if len(pos) < 10:
+            continue
+        medians[pname] = float(np.median(pos))
+
+    # Source hash: deterministic digest of cache file contents
+    h = hashlib.sha256()
+    for path in sorted(cache_dir.glob("comp_*.json")):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
+    source_hash = h.hexdigest()[:16]
+
+    return {
+        "_meta": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source_hash": source_hash,
+            "n_params": len(medians),
+        },
+        "medians": medians,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Priority scoring
 # ---------------------------------------------------------------------------
