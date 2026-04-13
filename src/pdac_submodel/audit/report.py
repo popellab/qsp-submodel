@@ -43,6 +43,8 @@ class AuditConfig:
     prcc_csv: Path | None = None
     compare_cache: Path | None = None
     sbi_dir: Path | None = None
+    sbi_run_path: Path | None = None
+    submodel_priors_yaml: Path | None = None
     model_names: list[str] = field(
         default_factory=lambda: ["TNBC", "CRC", "UM", "NSCLC", "HCC", "PDAC"]
     )
@@ -64,6 +66,11 @@ class AuditConfig:
             self.compare_cache = self.submodel_dir / ".compare_cache"
         if self.sbi_dir is None:
             self.sbi_dir = root / "figures"
+        if self.sbi_run_path is not None:
+            p = Path(self.sbi_run_path)
+            self.sbi_run_path = p if p.is_absolute() else (root / p).resolve()
+        if self.submodel_priors_yaml is None:
+            self.submodel_priors_yaml = self.submodel_dir / "submodel_priors.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -1104,6 +1111,263 @@ def _section_component_diagnostics(comp_diags):
     return lines
 
 
+def load_submodel_priors(path: Path) -> dict:
+    """Load submodel_priors.yaml → {name: {mu, sigma, median}} (log-space marginals).
+
+    Only lognormal marginals are used; others are skipped (no comparable σ).
+    """
+    if path is None or not Path(path).exists():
+        return {}
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    out = {}
+    for entry in data.get("parameters", []) or []:
+        name = entry.get("name")
+        m = entry.get("marginal", {}) or {}
+        if not name or m.get("distribution") != "lognormal":
+            continue
+        try:
+            import math
+            mu = float(m["mu"])
+            sigma = float(m["sigma"])
+            median = m.get("median")
+            # Fall back to exp(mu) when YAML dumped zero/None for tiny lognormals.
+            median_f = float(median) if median else math.exp(mu)
+            out[name] = {"mu": mu, "sigma": sigma, "median": median_f}
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def load_sbi_run(run_path: Path) -> dict | None:
+    """Load SBI run artifacts (posterior samples + diagnostics + metadata).
+
+    Returns None when the pinned run directory is missing required files.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if run_path is None or not run_path.exists():
+        return None
+
+    post_samples_path = run_path / "posterior_samples.csv"
+    diag_dir = run_path / "diagnostics"
+    zc_path = diag_dir / "z_score_contraction.csv"
+    summary_path = diag_dir / "summary.json"
+    local_path = run_path / "local_calibration.csv"
+
+    if not post_samples_path.exists():
+        print(f"[stage2] posterior_samples.csv not found in {run_path}")
+        return None
+
+    post_df = pd.read_csv(post_samples_path)
+
+    zc_df = pd.read_csv(zc_path) if zc_path.exists() else None
+    local_df = pd.read_csv(local_path) if local_path.exists() else None
+
+    meta = {}
+    if summary_path.exists():
+        with open(summary_path) as f:
+            summary = json.load(f)
+        meta = summary.get("training", {})
+
+    # Observed-data posterior stats (log-space on positive samples), mirroring
+    # the stage-1 contraction formula in load_compare_results.
+    observed: dict[str, dict] = {}
+    for pname in post_df.columns:
+        if pname.startswith("Unnamed:"):
+            continue
+        arr = post_df[pname].to_numpy(dtype=float)
+        pos = arr[arr > 0]
+        if len(pos) < 10:
+            continue
+        log_samps = np.log(pos)
+        observed[pname] = {
+            "median": float(np.median(pos)),
+            "post_mu": float(np.mean(log_samps)),
+            "post_sigma": float(np.std(log_samps)),
+        }
+
+    return {
+        "run_path": run_path,
+        "observed": observed,
+        "z_score_contraction": zc_df,
+        "local_calibration": local_df,
+        "metadata": meta,
+    }
+
+
+def _section_stage2_npe(
+    priors: dict,
+    stage1_priors: dict,
+    sbi_run: dict | None,
+) -> list[str]:
+    """Section: Stage 2 NPE posterior shifts vs pre-stage-1 and post-stage-1 priors.
+
+    Reports per-parameter contraction and z-score at the observed data
+    (same formulas as the submodel stage-1 section) against two references:
+      - pre: pdac_priors.csv (total calibration effect)
+      - post-S1: submodel_priors.yaml fit marginals (stage 2 marginal effect)
+    Also surfaces the SBC-style median contraction from z_score_contraction.csv.
+    """
+    if sbi_run is None:
+        return []
+
+    observed = sbi_run["observed"]
+    if not observed:
+        return []
+
+    meta = sbi_run["metadata"]
+    zc_df = sbi_run["z_score_contraction"]
+    zc_map = (
+        {row["parameter"]: row for _, row in zc_df.iterrows()} if zc_df is not None else {}
+    )
+    local_df = sbi_run.get("local_calibration")
+    local_map = (
+        {row["parameter"]: row for _, row in local_df.iterrows()}
+        if local_df is not None else {}
+    )
+
+    lines = ["---\n", "## Stage 2: NPE posterior shifts\n"]
+    run_path = sbi_run["run_path"]
+    lines.append(
+        f"Run: `{run_path.name}` — contraction + shift against pre-stage-1 prior "
+        "(`pdac_priors.csv`) and post-stage-1 prior (`submodel_priors.yaml`).\n"
+    )
+
+    bits = []
+    if meta.get("prcc_tier") is not None:
+        bits.append(f"PRCC tier {meta['prcc_tier']} ({meta.get('n_params', '?')} of {meta.get('n_params_full', '?')} params)")
+    if meta.get("scenarios"):
+        bits.append(f"{len(meta['scenarios'])} scenarios")
+    if meta.get("n_train") is not None:
+        bits.append(f"n_train={meta['n_train']}")
+    if stage1_priors:
+        bits.append(f"{len(stage1_priors)} params with stage-1 posterior")
+    if bits:
+        lines.append(" · ".join(bits) + "\n")
+
+    def _stats(post_sigma: float, post_mu: float, ref: dict | None):
+        if not ref or ref.get("sigma", 0) <= 0:
+            return None, None
+        contr = 1.0 - (post_sigma / ref["sigma"]) ** 2
+        z = abs(post_mu - ref["mu"]) / ref["sigma"]
+        return contr, z
+
+    rows = []
+    for pname, stats in observed.items():
+        prior = priors.get(pname)
+        if not prior or prior.get("sigma", 0) <= 0:
+            continue
+        c_pre, z_pre = _stats(stats["post_sigma"], stats["post_mu"], prior)
+        s1 = stage1_priors.get(pname)
+        c_s1, z_s1 = _stats(stats["post_sigma"], stats["post_mu"], s1)
+        zc = zc_map.get(pname, {})
+        lc = local_map.get(pname, {})
+        rows.append({
+            "name": pname,
+            "prior_median": prior["median"],
+            "prior_sigma": prior["sigma"],
+            "s1_median": s1["median"] if s1 else None,
+            "s1_sigma": s1["sigma"] if s1 else None,
+            "post_median": stats["median"],
+            "post_sigma": stats["post_sigma"],
+            "contraction_pre": c_pre,
+            "z_pre": z_pre,
+            "contraction_s1": c_s1,
+            "z_s1": z_s1,
+            "contraction_sbc": zc.get("contraction_median"),
+            "contraction_global": lc.get("contraction_global") if lc is not None else None,
+            "contraction_local_shell": lc.get("contraction_local") if lc is not None else None,
+            "ks_p_global": lc.get("ks_pval_global") if lc is not None else None,
+            "ks_p_local": lc.get("ks_pval_local") if lc is not None else None,
+            "sbc_z_abs_mean": zc.get("z_score_abs_mean"),
+            "sbc_z_mean": zc.get("z_score_mean"),
+        })
+
+    if not rows:
+        lines.append("_No parameters matched the priors CSV — check parameter names._\n")
+        return lines
+
+    rows.sort(key=lambda r: -r["contraction_pre"])
+
+    n_strong = sum(1 for r in rows if r["contraction_pre"] >= 0.5)
+    n_weak = sum(1 for r in rows if r["contraction_pre"] < 0.1)
+    n_shift = sum(1 for r in rows if r["z_pre"] > 2)
+    s1_rows = [r for r in rows if r["contraction_s1"] is not None]
+    lines.append(
+        f"vs pre: **{n_strong}/{len(rows)}** contraction ≥50%, "
+        f"**{n_weak}** below 10%, **{n_shift}** with |z|>2.\n"
+    )
+    if s1_rows:
+        n_s1_strong = sum(1 for r in s1_rows if r["contraction_s1"] >= 0.5)
+        n_s1_weak = sum(1 for r in s1_rows if r["contraction_s1"] < 0.1)
+        n_s1_shift = sum(1 for r in s1_rows if r["z_s1"] > 2)
+        lines.append(
+            f"vs stage-1 ({len(s1_rows)} params): **{n_s1_strong}** ≥50%, "
+            f"**{n_s1_weak}** below 10%, **{n_s1_shift}** with |z|>2.\n"
+        )
+
+    lines.append(
+        "| Parameter | σ pre | σ S1 | σ post | Median pre | Median S1 | Median post | "
+        "z (pre) | Contr (pre) | z (S1) | Contr (S1) | Contr global | Contr local-shell | "
+        "KS p local | z̄ SBC | Flags |"
+    )
+    lines.append(
+        "|-----------|:----:|:----:|:-----:|-----------:|----------:|------------:|"
+        ":------:|:-----------:|:------:|:----------:|:------------:|:-----------------:|"
+        ":---------:|:-----:|:-----:|"
+    )
+    for r in rows:
+        flags = []
+        if r["contraction_pre"] < 0.1:
+            flags.append("weak_pre")
+        if r["z_pre"] > 2:
+            flags.append("shift_pre")
+        if r["contraction_s1"] is not None and r["z_s1"] > 2:
+            flags.append("shift_S1")
+        if r["contraction_sbc"] is not None and r["contraction_sbc"] < 0.1:
+            flags.append("non-id")
+        if r["ks_p_local"] is not None and r["ks_p_local"] < 0.05:
+            flags.append("miscal")
+        if r["sbc_z_abs_mean"] is not None and r["sbc_z_abs_mean"] > 1.0:
+            flags.append("biased")
+        flag_str = ", ".join(flags) if flags else ""
+        c_global = (
+            f"{r['contraction_global']:.0%}" if r["contraction_global"] is not None
+            else (f"{r['contraction_sbc']:.0%}" if r["contraction_sbc"] is not None else "---")
+        )
+        c_local = (
+            _contraction_bar(r["contraction_local_shell"])
+            if r["contraction_local_shell"] is not None else "---"
+        )
+        s1_med = f"{r['s1_median']:.4g}" if r["s1_median"] is not None else "---"
+        s1_z = f"{r['z_s1']:.2f}" if r["z_s1"] is not None else "---"
+        s1_contr = _contraction_bar(r["contraction_s1"]) if r["contraction_s1"] is not None else "---"
+        ks_str = f"{r['ks_p_local']:.2g}" if r["ks_p_local"] is not None else "---"
+        z_sbc_str = f"{r['sbc_z_abs_mean']:.2f}" if r["sbc_z_abs_mean"] is not None else "---"
+        lines.append(
+            f"| `{r['name']}` | {_fmt_sigma(r['prior_sigma'])} | {_fmt_sigma(r['s1_sigma'])} | "
+            f"{_fmt_sigma(r['post_sigma'])} | {r['prior_median']:.4g} | {s1_med} | {r['post_median']:.4g} | "
+            f"{r['z_pre']:.2f} | {_contraction_bar(r['contraction_pre'])} | "
+            f"{s1_z} | {s1_contr} | {c_global} | {c_local} | "
+            f"{ks_str} | {z_sbc_str} | {flag_str} |"
+        )
+    lines.append("")
+    lines.append(
+        "> **pre** = `pdac_priors.csv` (pre-stage-1 baseline). "
+        "**S1** = `submodel_priors.yaml` (post-stage-1; empty when the parameter has no stage-1 target). "
+        "**z (pre/S1)** and **Contr (pre/S1)** are _local_ metrics at the observed data: "
+        "`|μ_post − μ_ref|/σ_ref` and `1 − (σ_post/σ_ref)²` on posterior samples at x_obs. "
+        "**Contr global** = mean contraction across `theta_test` ~ prior (from `local_calibration.csv`, "
+        "fallback `z_score_contraction.csv` median) — identifiability under the prior. "
+        "**Contr local-shell** = mean contraction across `theta_test_local` (shell near x_obs) from `local_calibration.csv` — identifiability in the neighborhood of the observation. "
+        "**KS p local** = p-value of KS test on posterior z-scores in the shell around x_obs (`ks_pval_local`) — calibration check; low p ⇒ posterior ranks deviate from uniform, flagged `miscal`. "
+        "**z̄ SBC** = mean |z-score| over `theta_test ~ prior` (`z_score_abs_mean`) — global bias; values >1 flagged `biased` (posterior mean systematically offset from truth).\n"
+    )
+    return lines
+
+
 def generate_report(
     priors: dict,
     targets: dict,
@@ -1116,6 +1380,8 @@ def generate_report(
     output_dir: Path | None = None,
     cross_model: dict | None = None,
     submodel_dir: Path | None = None,
+    sbi_run: dict | None = None,
+    stage1_priors: dict | None = None,
 ) -> str:
     n_total = len(priors)
     n_covered = sum(1 for p in priors if p in targets)
@@ -1127,6 +1393,7 @@ def generate_report(
     lines.extend(_section_target_health(priors, targets, compare_results, output_dir, joint_samples, submodel_dir=submodel_dir))
     lines.extend(_section_component_diagnostics(comp_diags))
     lines.extend(_section_whats_left(priors, targets, groups, prcc, sbi_runs))
+    lines.extend(_section_stage2_npe(priors, stage1_priors or {}, sbi_run))
     lines.extend(_section_cross_model(priors, targets, compare_results, cross_model))
     return "\n".join(lines)
 
@@ -1307,6 +1574,14 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
     if comp_diags:
         print(f"Loaded diagnostics for {len(comp_diags)} components")
 
+    sbi_run = load_sbi_run(config.sbi_run_path) if config.sbi_run_path else None
+    if sbi_run:
+        print(f"Loaded SBI run: {config.sbi_run_path}")
+
+    stage1_priors = load_submodel_priors(config.submodel_priors_yaml)
+    if stage1_priors:
+        print(f"Loaded stage-1 priors for {len(stage1_priors)} parameters")
+
     output_dir = output.parent if output else None
 
     report = generate_report(
@@ -1316,6 +1591,8 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
         output_dir=output_dir,
         cross_model=cross_model,
         submodel_dir=config.submodel_dir,
+        sbi_run=sbi_run,
+        stage1_priors=stage1_priors,
     )
 
     if output:
@@ -1363,12 +1640,19 @@ def main():
         metavar="PARAM",
         help="Invalidate cached components containing these parameters before re-running inference",
     )
+    parser.add_argument(
+        "--sbi-run-path",
+        type=Path,
+        default=None,
+        help="Pinned SBI run directory with posterior_samples.csv and diagnostics/ (enables Stage 2 section)",
+    )
     args = parser.parse_args()
 
     config = AuditConfig(
         project_root=args.project_root,
         priors_csv=args.priors_csv,
         submodel_dir=args.submodel_dir,
+        sbi_run_path=args.sbi_run_path,
     )
 
     report = run_audit(config, output=args.output, invalidate_params=args.invalidate)
