@@ -1289,16 +1289,47 @@ def _section_stage2_npe(
         lines.append("_No parameters matched the priors CSV — check parameter names._\n")
         return lines
 
-    rows.sort(key=lambda r: -r["contraction_pre"])
+    # Sort by the trustworthy metric: mean contraction over theta_test drawn
+    # from a shell around x_obs. The single-point `contraction_pre` at x_obs
+    # can look tight as a flow artifact (see artifact flag below), so ranking
+    # by it puts non-identified params at the top. Fall back to the global
+    # mean contraction, then the single-point value, when shell/global are
+    # unavailable.
+    def _sort_key(r):
+        for k in ("contraction_local_shell", "contraction_global", "contraction_pre"):
+            v = r.get(k)
+            if v is not None:
+                return -v
+        return 0.0
 
-    n_strong = sum(1 for r in rows if r["contraction_pre"] >= 0.5)
-    n_weak = sum(1 for r in rows if r["contraction_pre"] < 0.1)
+    rows.sort(key=_sort_key)
+
+    def _strong(r):
+        v = r.get("contraction_local_shell")
+        if v is None:
+            v = r.get("contraction_global")
+        if v is None:
+            v = r.get("contraction_pre")
+        return v is not None and v >= 0.5
+
+    def _weak(r):
+        v = r.get("contraction_local_shell")
+        if v is None:
+            v = r.get("contraction_global")
+        if v is None:
+            v = r.get("contraction_pre")
+        return v is not None and v < 0.1
+
+    n_strong_shell = sum(1 for r in rows if _strong(r))
+    n_weak_shell = sum(1 for r in rows if _weak(r))
     n_shift = sum(1 for r in rows if r["z_pre"] > 2)
     s1_rows = [r for r in rows if r["contraction_s1"] is not None]
     lines.append(
-        f"vs pre: **{n_strong}/{len(rows)}** contraction ≥50%, "
-        f"**{n_weak}** below 10%, **{n_shift}** with |z|>2.\n"
+        f"shell-local: **{n_strong_shell}/{len(rows)}** contraction ≥50%, "
+        f"**{n_weak_shell}** below 10% (identifiability near x_obs — the "
+        "trustworthy metric; table sorted by this column).\n"
     )
+    lines.append(f"vs pre (single-point at x_obs): **{n_shift}** with |z|>2.\n")
     if s1_rows:
         n_s1_strong = sum(1 for r in s1_rows if r["contraction_s1"] >= 0.5)
         n_s1_weak = sum(1 for r in s1_rows if r["contraction_s1"] < 0.1)
@@ -1320,6 +1351,15 @@ def _section_stage2_npe(
     )
     for r in rows:
         flags = []
+        # Single-point artifact: tight posterior at x_obs that does not
+        # persist when averaging over nearby test observations — classic NPE
+        # single-point overfit rather than genuine identification.
+        if (
+            r["contraction_pre"] >= 0.5
+            and r["contraction_local_shell"] is not None
+            and r["contraction_local_shell"] < 0.2
+        ):
+            flags.append("artifact")
         if r["contraction_pre"] < 0.1:
             flags.append("weak_pre")
         if r["z_pre"] > 2:
@@ -1363,7 +1403,8 @@ def _section_stage2_npe(
         "fallback `z_score_contraction.csv` median) — identifiability under the prior. "
         "**Contr local-shell** = mean contraction across `theta_test_local` (shell near x_obs) from `local_calibration.csv` — identifiability in the neighborhood of the observation. "
         "**KS p local** = p-value of KS test on posterior z-scores in the shell around x_obs (`ks_pval_local`) — calibration check; low p ⇒ posterior ranks deviate from uniform, flagged `miscal`. "
-        "**z̄ SBC** = mean |z-score| over `theta_test ~ prior` (`z_score_abs_mean`) — global bias; values >1 flagged `biased` (posterior mean systematically offset from truth).\n"
+        "**z̄ SBC** = mean |z-score| over `theta_test ~ prior` (`z_score_abs_mean`) — global bias; values >1 flagged `biased` (posterior mean systematically offset from truth). "
+        "**`artifact`** flag = single-point posterior at x_obs looks tight (`Contr (pre) ≥ 50%`) but fails to hold up under shell averaging (`Contr local-shell < 20%`) — the concentration is a flow artifact, not genuine identification.\n"
     )
     return lines
 
