@@ -137,7 +137,7 @@ def load_parameter_groups(path: Path) -> dict:
 
 
 def load_prcc(path: Path) -> dict:
-    """Load PRCC rankings → {param_name: {rank, mean_abs_prcc, significant}}."""
+    """Load PRCC rankings → {param_name: {rank, mean_abs_prcc, significant, n_sig_obs}}."""
     if not path.exists():
         return {}
     rankings = {}
@@ -147,10 +147,15 @@ def load_prcc(path: Path) -> dict:
             name = row.get("parameter", "").strip()
             if not name:
                 continue
+            try:
+                n_sig = int(float(row.get("n_significant_prcc", 0)))
+            except (ValueError, TypeError):
+                n_sig = 0
             rankings[name] = {
                 "rank": int(row.get("rank_prcc", 999)),
                 "mean_abs_prcc": float(row.get("mean_abs_prcc", 0)),
                 "significant": row.get("significant", "").lower() == "true",
+                "n_sig_obs": n_sig,
             }
     return rankings
 
@@ -544,14 +549,21 @@ def compute_priority(
     prcc_rank: int | None,
     n_targets: int,
     in_group: bool,
+    stage1_effectiveness: float = 1.0,
 ) -> float:
     """Higher score = higher priority for extraction.
 
     Factors:
     - High sigma (unconstrained) → high priority
     - Low PRCC rank (high sensitivity) → high priority
-    - No existing targets → high priority
+    - No *effective* existing targets → high priority
     - Not in a parameter group (no partial pooling fallback) → higher priority
+
+    ``stage1_effectiveness`` is ``1 - (sigma_S1 / sigma_prior)**2`` clipped
+    to [0, 1]; it weights the target count so that an existing-but-
+    ineffective target does not discount priority (the param still needs
+    data). When no stage-1 posterior is available, callers default to 1.0
+    (preserves legacy behavior of counting targets at face value).
     """
     # Sigma contribution (0-1, normalized to typical range 0.3-1.5)
     sigma_score = min(sigma / 1.0, 1.5)
@@ -562,8 +574,10 @@ def compute_priority(
     else:
         prcc_score = 0.3  # unknown sensitivity → moderate
 
-    # Target coverage penalty
-    coverage_penalty = 1.0 / (1 + n_targets)
+    # Target coverage penalty, weighted by how much existing targets
+    # actually contracted the stage-1 posterior.
+    effective_coverage = n_targets * max(0.0, min(1.0, stage1_effectiveness))
+    coverage_penalty = 1.0 / (1 + effective_coverage)
 
     # Group membership discount (grouped params get partial pooling)
     group_factor = 0.7 if in_group else 1.0
@@ -620,18 +634,37 @@ def _score_params(priors, targets, groups, prcc, compare_results, cross_model, s
                 sigma_val = sigma_shell
                 sigma_src = "S2"
 
+        # Stage-1 effectiveness: how much did submodel-target inference
+        # actually contract this param's posterior from the prior?
+        # Missing S1 posterior → treat as fully effective (neutral) so
+        # coverage_penalty reduces to the legacy (1+n_targets) form.
+        s1_joint = (compare_results.get("parameters", {}).get(name, {}) or {}).get("joint") or {}
+        s1_sigma_val = s1_joint.get("sigma")
+        if s1_sigma_val is not None and info["sigma"] > 0:
+            s1_effectiveness = max(
+                0.0,
+                min(1.0, 1.0 - (float(s1_sigma_val) / info["sigma"]) ** 2),
+            )
+        else:
+            s1_effectiveness = 1.0
+
         xmodel = (cross_model or {}).get(name)
         scored.append({
             "name": name,
-            "score": compute_priority(sigma_val, prcc_rank, n_tgt, name in groups),
+            "score": compute_priority(
+                sigma_val, prcc_rank, n_tgt, name in groups, s1_effectiveness
+            ),
             "sigma": sigma_val,
             "sigma_src": sigma_src,
             "units": info["units"],
             "prcc_rank": prcc_rank,
             "prcc_significant": prcc_info.get("significant", False),
+            "n_sig_obs": prcc_info.get("n_sig_obs", 0),
             "group": groups.get(name),
             "type": classify_param(name),
             "n_targets": n_tgt,
+            "s1_effectiveness": s1_effectiveness,
+            "s1_sigma": float(s1_sigma_val) if s1_sigma_val is not None else None,
             "cross_model": _cross_model_summary(xmodel) if xmodel else "",
             "cross_n_models": xmodel["n_models"] if xmodel else 0,
         })
@@ -652,38 +685,101 @@ def _section_header(n_covered, n_total, has_prcc):
 
 
 def _section_extraction_priority(scored, groups, targets, cross_model):
-    """Section 1: What should I extract next?"""
+    """Section 1: What should I extract next?
+
+    Splits candidates into two lists driven by different follow-ups:
+      * **New target** — no existing submodel target; needs literature
+        extraction.
+      * **Improve existing** — has at least one target but stage-1
+        inference barely moved the posterior from the prior; check
+        whether the target is wrong, the forward-model submodel code is
+        wrong, or the prior needs widening.
+    """
     lines = ["---\n", "## What should I extract next?\n"]
 
-    if scored:
-        lines.append("Ranked by impact (PRCC sensitivity x uncertainty). Covered params with weak contraction also appear.\n")
-        has_xmodel = cross_model and any(s["cross_n_models"] > 0 for s in scored[:20])
-        hdr = "| # | Parameter | Type | Sigma | PRCC | Targets | Score |"
-        sep = "|--:|-----------|------|------:|-----:|:-------:|------:|"
+    def _sigma_str(s):
+        out = f"{s['sigma']:.2f}"
+        if s["sigma_src"] != "prior":
+            out += f" ({s['sigma_src']})"
+        return out
+
+    def _sig_obs_str(s):
+        n = s.get("n_sig_obs", 0) or 0
+        return str(n) if n else "---"
+
+    def _render_table(rows, limit, include_effectiveness):
+        has_xmodel = cross_model and any(r["cross_n_models"] > 0 for r in rows[:limit])
+        hdr_cols = ["#", "Parameter", "Type", "Sigma", "PRCC", "#obs"]
+        sep_cols = ["--:", "-----------", "------", "------:", "-----:", "----:"]
+        if include_effectiveness:
+            hdr_cols += ["Targets", "S1 eff"]
+            sep_cols += [":-------:", "-----:"]
+        else:
+            hdr_cols += ["Targets"]
+            sep_cols += [":-------:"]
+        hdr_cols += ["Score"]
+        sep_cols += ["------:"]
         if has_xmodel:
-            hdr += " Models |"
-            sep += "-------:|"
-        lines.append(hdr)
-        lines.append(sep)
-        for i, s in enumerate(scored[:20], 1):
+            hdr_cols += ["Models"]
+            sep_cols += ["-------:"]
+        lines.append("| " + " | ".join(hdr_cols) + " |")
+        lines.append("|" + "|".join(sep_cols) + "|")
+        for i, s in enumerate(rows[:limit], 1):
             rank = f"#{s['prcc_rank']}" if s["prcc_rank"] is not None else ""
-            sigma_str = f"{s['sigma']:.2f}"
-            if s["sigma_src"] != "prior":
-                sigma_str += f" ({s['sigma_src']})"
             tgt_str = str(s["n_targets"]) if s["n_targets"] > 0 else "---"
-            row = (
-                f"| {i} | `{s['name']}` | {s['type']} | "
-                f"{sigma_str} | {rank} | {tgt_str} | {s['score']:.2f} |"
-            )
+            cells = [
+                str(i),
+                f"`{s['name']}`",
+                s["type"],
+                _sigma_str(s),
+                rank,
+                _sig_obs_str(s),
+            ]
+            if include_effectiveness:
+                eff = f"{s['s1_effectiveness']:.0%}" if s["n_targets"] > 0 else "---"
+                cells += [tgt_str, eff]
+            else:
+                cells += [tgt_str]
+            cells += [f"{s['score']:.2f}"]
             if has_xmodel:
-                row += f" {s['cross_n_models']}/6 |" if s["cross_n_models"] else " --- |"
-            lines.append(row)
-        if len(scored) > 20:
-            tail = f"| | *...{len(scored) - 20} more* | | | | | |"
-            if has_xmodel:
-                tail += " |"
-            lines.append(tail)
+                cells += [f"{s['cross_n_models']}/6" if s["cross_n_models"] else "---"]
+            lines.append("| " + " | ".join(cells) + " |")
+        if len(rows) > limit:
+            lines.append(f"| | *...{len(rows) - limit} more* | | | | | |")
         lines.append("")
+
+    if scored:
+        new_target = [s for s in scored if s["n_targets"] == 0]
+        improve = [
+            s for s in scored
+            if s["n_targets"] > 0 and s["s1_effectiveness"] < 0.3
+        ]
+        improve.sort(key=lambda s: (s["s1_effectiveness"], -s["score"]))
+
+        lines.append(
+            "Ranked by impact (sigma × PRCC × effective-coverage). "
+            "**#obs** = count of observables where this param is PRCC-significant "
+            "(informs where to look for constraining data). "
+            "**S1 eff** = how much submodel inference actually contracted the "
+            "posterior from the prior; low values mean the existing target is "
+            "ineffective and the param re-enters the priority list.\n"
+        )
+
+        if new_target:
+            lines.append("### New target — literature extraction\n")
+            _render_table(new_target, 20, include_effectiveness=False)
+
+        if improve:
+            lines.append("### Improve existing — ineffective target (S1 eff < 30%)\n")
+            lines.append(
+                "These params have at least one submodel target, but stage-1 "
+                "inference barely moved the posterior. Likely causes: target "
+                "is wrong, forward-model code is wrong, or the prior needs "
+                "widening. Extract new data, re-audit existing target, or "
+                "widen the prior — not the same action as the *new target* "
+                "list above.\n"
+            )
+            _render_table(improve, 15, include_effectiveness=True)
 
     # Low-hanging fruit
     easy = [s for s in scored if s["type"] in ("EC50", "secretion") and s["sigma"] > 0.4]
