@@ -576,8 +576,29 @@ def compute_priority(
 # ---------------------------------------------------------------------------
 
 
-def _score_params(priors, targets, groups, prcc, compare_results, cross_model):
-    """Compute priority-scored list for all parameters."""
+def _score_params(priors, targets, groups, prcc, compare_results, cross_model, sbi_run=None):
+    """Compute priority-scored list for all parameters.
+
+    Sigma preference (tightest wins): stage-2 shell-local implied sigma →
+    stage-1 joint posterior sigma → pdac_priors.csv prior sigma. The
+    stage-2 shell-local sigma is derived from the mean contraction across
+    `theta_test_local` in `local_calibration.csv` via
+    ``sigma_shell = sigma_prior * sqrt(max(1 - contraction_local, 0))`` —
+    this is the trustworthy SBC-style estimate of remaining uncertainty
+    (the single-point posterior at x_obs can be tight as an NPE artifact,
+    see the `artifact` flag in the stage-2 section).
+    """
+    import math
+
+    local_map = {}
+    if sbi_run is not None and sbi_run.get("local_calibration") is not None:
+        lc_df = sbi_run["local_calibration"]
+        if "contraction_local" in lc_df.columns:
+            local_map = {
+                row["parameter"]: row["contraction_local"]
+                for _, row in lc_df.iterrows()
+            }
+
     scored = []
     for name, info in priors.items():
         prcc_info = prcc.get(name, {})
@@ -590,7 +611,14 @@ def _score_params(priors, targets, groups, prcc, compare_results, cross_model):
             joint = compare_results["parameters"][name].get("joint") or {}
             if joint.get("sigma") is not None:
                 sigma_val = float(joint["sigma"])
-                sigma_src = "post"
+                sigma_src = "S1"
+
+        contr = local_map.get(name)
+        if contr is not None and not math.isnan(float(contr)):
+            sigma_shell = info["sigma"] * math.sqrt(max(1.0 - float(contr), 0.0))
+            if sigma_shell < sigma_val:
+                sigma_val = sigma_shell
+                sigma_src = "S2"
 
         xmodel = (cross_model or {}).get(name)
         scored.append({
@@ -1426,7 +1454,7 @@ def generate_report(
 ) -> str:
     n_total = len(priors)
     n_covered = sum(1 for p in priors if p in targets)
-    scored = _score_params(priors, targets, groups, prcc, compare_results, cross_model)
+    scored = _score_params(priors, targets, groups, prcc, compare_results, cross_model, sbi_run=sbi_run)
 
     lines = []
     lines.extend(_section_header(n_covered, n_total, bool(prcc)))
