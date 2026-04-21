@@ -5,6 +5,12 @@ Auto-detects available data and reports:
 - Stage 0: Prior coverage, submodel target coverage, PRCC-weighted priority
 - Stage 1: Submodel posterior contraction (when inference results exist)
 - Stage 2: NPE posterior shifts vs submodel posteriors (when SBI results exist)
+- Clinical predictive uncertainty: CI95 widths for PPC clinical endpoints
+  (OS/DFS landmarks, RECIST, tumor size, TTP) and Spearman attribution of
+  remaining spread back to parameters — surfaces the extraction priorities
+  that would shrink predictive uncertainty. Emits only when the promoted
+  stage-2 run has ``posterior_predictive_clinical.csv`` alongside its
+  posterior samples.
 
 Usage:
     python -m qsp_inference.audit.report --project-root /path/to/project
@@ -41,6 +47,8 @@ class AuditConfig:
     submodel_dir: Path | None = None
     param_groups: Path | None = None
     prcc_csv: Path | None = None
+    prcc_matrix_csv: Path | None = None
+    prcc_pvalue_matrix_csv: Path | None = None
     compare_cache: Path | None = None
     sbi_dir: Path | None = None
     sbi_run_path: Path | None = None
@@ -62,6 +70,10 @@ class AuditConfig:
             self.param_groups = self.submodel_dir / "submodel_config.yaml"
         if self.prcc_csv is None:
             self.prcc_csv = root / "results" / "prcc_sensitivity" / "aggregate_parameter_ranking.csv"
+        if self.prcc_matrix_csv is None:
+            self.prcc_matrix_csv = self.prcc_csv.parent / "prcc_matrix.csv"
+        if self.prcc_pvalue_matrix_csv is None:
+            self.prcc_pvalue_matrix_csv = self.prcc_csv.parent / "prcc_pvalue_matrix.csv"
         if self.compare_cache is None:
             self.compare_cache = self.submodel_dir / ".compare_cache"
         if self.sbi_dir is None:
@@ -1312,11 +1324,20 @@ def load_sbi_run(run_path: Path) -> dict | None:
             "post_sigma": float(np.std(log_samps)),
         }
 
+    # OBED Phase-D input (optional): clinical-endpoint PPC at the promoted
+    # posterior. Present when workflows/run_ppc_clinical.py has been run
+    # against this stage-2 directory. Absent on older runs — the OBED
+    # section is silently skipped there.
+    ppc_path = run_path / "posterior_predictive_clinical.csv"
+    ppc_df = pd.read_csv(ppc_path) if ppc_path.exists() else None
+
     return {
         "run_path": run_path,
         "observed": observed,
+        "posterior_samples": post_df,
         "z_score_contraction": zc_df,
         "local_calibration": local_df,
+        "ppc_clinical": ppc_df,
         "metadata": meta,
     }
 
@@ -1533,6 +1554,221 @@ def _section_stage2_npe(
     return lines
 
 
+def _section_predictive_uncertainty(
+    sbi_run: dict | None,
+    priors: dict,
+    prcc: dict | None,
+    output_dir: Path | None,
+    top_k_drivers: int = 5,
+    ci_width_threshold: float = 0.5,
+) -> list[str]:
+    """Section: clinical-endpoint predictive uncertainty + driver attribution.
+
+    Reads ``posterior_predictive_clinical.csv`` (produced by
+    ``workflows/run_ppc_clinical.py`` in pdac-build). The long-format CSV
+    carries one row per ``(sample_index, scenario, endpoint)`` — this
+    section pivots it to a per-endpoint CI table, then computes
+    Spearman(posterior_sample, endpoint_value) per (endpoint, param) and
+    surfaces the top drivers. Drops ``output_dir``-relative CSV side files
+    so downstream notebooks don't re-scrape the markdown.
+
+    The CI width threshold (default 50% of |median|) is a soft signal, not
+    a stopping rule — an endpoint whose median is near zero by construction
+    (e.g. recist_cr_at_day_90 when CR is rare) will always look wide in
+    that ratio.
+    """
+    if sbi_run is None:
+        return []
+    ppc_df = sbi_run.get("ppc_clinical")
+    post_df = sbi_run.get("posterior_samples")
+    if ppc_df is None or post_df is None or len(ppc_df) == 0:
+        return []
+
+    import numpy as np
+    import pandas as pd
+    from scipy.stats import spearmanr
+
+    lines = ["---\n", "## Clinical predictive uncertainty\n"]
+    lines.append(
+        "Posterior-predictive summaries for long-horizon clinical endpoints "
+        "(OS/DFS landmarks, RECIST 1.1, tumor diameter, TTP). CI95 width → "
+        "remaining uncertainty; Spearman(posterior, endpoint) → parameters "
+        "driving that spread.\n"
+    )
+
+    n_draws = ppc_df["sample_index"].nunique()
+    scenarios = sorted(ppc_df["scenario"].unique())
+    endpoints = sorted(ppc_df["endpoint"].unique())
+    lines.append(
+        f"Inputs: {n_draws} posterior draws · {len(scenarios)} scenarios "
+        f"(`{'`, `'.join(scenarios)}`) · {len(endpoints)} endpoints.\n"
+    )
+
+    # ---- Per-(scenario, endpoint) CI table ---------------------------------
+    ci_rows = []
+    for (scen, ep), group in ppc_df.groupby(["scenario", "endpoint"]):
+        vals = group["value"].to_numpy(dtype=float)
+        status = group["status"].to_numpy()
+        ok = np.isfinite(vals) & (status == 0)
+        n_ok = int(ok.sum())
+        if n_ok < 5:
+            ci_rows.append({
+                "scenario": scen, "endpoint": ep, "n_ok": n_ok,
+                "p05": np.nan, "median": np.nan, "p95": np.nan,
+                "ci95_width": np.nan, "ci95_frac_of_median": np.nan,
+                "n_failed": int(len(vals) - n_ok),
+            })
+            continue
+        v = vals[ok]
+        p05, med, p95 = np.percentile(v, [5, 50, 95])
+        w = p95 - p05
+        frac = w / abs(med) if abs(med) > 1e-12 else np.nan
+        ci_rows.append({
+            "scenario": scen, "endpoint": ep, "n_ok": n_ok,
+            "p05": p05, "median": med, "p95": p95,
+            "ci95_width": w, "ci95_frac_of_median": frac,
+            "n_failed": int(len(vals) - n_ok),
+        })
+    ci_df = pd.DataFrame(ci_rows).sort_values(
+        ["scenario", "endpoint"]
+    ).reset_index(drop=True)
+
+    # Headline counts use the fraction-of-median rule and skip NaN rows
+    # (endpoints where median ≈ 0 are undefined under this metric — report
+    # the count separately so the user can see what's excluded).
+    wide = int((ci_df["ci95_frac_of_median"] >= ci_width_threshold).sum())
+    tight = int((ci_df["ci95_frac_of_median"] < 0.1).sum())
+    undefined = int(ci_df["ci95_frac_of_median"].isna().sum())
+    lines.append(
+        f"**{wide} / {len(ci_df)}** endpoint-scenario pairs have CI95 width "
+        f"≥ {ci_width_threshold:.0%} of |median| (broad); **{tight}** are "
+        f"below 10% (tight); **{undefined}** are undefined "
+        "(|median| ≈ 0, so the ratio is meaningless — consult absolute width).\n"
+    )
+
+    lines.append(
+        "| Scenario | Endpoint | n_ok | p05 | median | p95 | CI95 width | CI95/|med| |"
+    )
+    lines.append(
+        "|----------|----------|-----:|----:|-------:|----:|----------:|----------:|"
+    )
+    for _, r in ci_df.iterrows():
+        def _f(v, fmt=".4g"):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return "---"
+            return format(v, fmt)
+        frac_str = (
+            f"{r['ci95_frac_of_median']:.0%}"
+            if not np.isnan(r["ci95_frac_of_median"]) else "---"
+        )
+        lines.append(
+            f"| `{r['scenario']}` | `{r['endpoint']}` | {r['n_ok']} | "
+            f"{_f(r['p05'])} | {_f(r['median'])} | {_f(r['p95'])} | "
+            f"{_f(r['ci95_width'])} | {frac_str} |"
+        )
+    lines.append("")
+
+    # ---- Driver attribution: Spearman(posterior, endpoint) -----------------
+    # Align post_df rows to PPC sample_indices. post_df is ordered by row;
+    # the PPC CSV carries ``sample_index`` explicitly to survive chunked
+    # simulation. Pivot value to wide: rows = sample_index, cols = endpoint.
+    sample_indices = post_df.index.to_numpy()
+    if "sample_index" not in ppc_df.columns:
+        lines.append(
+            "_Driver attribution skipped: PPC CSV missing `sample_index` column._\n"
+        )
+        return lines
+
+    # Restrict to parameters that (a) are in the posterior and (b) are
+    # PRCC-significant when PRCC is available — otherwise every endpoint
+    # would name 177 drivers and the table becomes noise.
+    post_params = [c for c in post_df.columns if not c.startswith("Unnamed:")]
+    if prcc:
+        prcc_sig = {p for p, info in prcc.items() if info.get("significant")}
+        if prcc_sig:
+            restricted = [p for p in post_params if p in prcc_sig]
+            if restricted:
+                post_params = restricted
+
+    # Spearman is rank-based, so zero-variance columns (all posterior draws
+    # equal → uninformative param in training) return NaN; filter those
+    # early to avoid log-spam from scipy.
+    theta_mat = post_df[post_params].to_numpy(dtype=float)
+    nonzero_var = theta_mat.std(axis=0) > 0
+    theta_mat = theta_mat[:, nonzero_var]
+    post_params = [n for n, keep in zip(post_params, nonzero_var) if keep]
+
+    corr_rows = []
+    drivers_per_endpoint: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    for (scen, ep), group in ppc_df.groupby(["scenario", "endpoint"]):
+        # Align PPC values to post_df row order via sample_index. Missing
+        # sample_indices (failed sims dropped earlier) get NaN; spearmanr
+        # below handles them via ``nan_policy='omit'``.
+        ppc_by_si = dict(
+            zip(group["sample_index"].to_numpy(), group["value"].to_numpy())
+        )
+        y = np.array(
+            [ppc_by_si.get(int(si), np.nan) for si in sample_indices],
+            dtype=float,
+        )
+        if np.count_nonzero(np.isfinite(y)) < 10 or np.nanstd(y) == 0:
+            continue
+        rhos = []
+        for j, pname in enumerate(post_params):
+            r, _ = spearmanr(theta_mat[:, j], y, nan_policy="omit")
+            if np.isnan(r):
+                continue
+            rhos.append((pname, float(r)))
+            corr_rows.append({
+                "scenario": scen,
+                "endpoint": ep,
+                "parameter": pname,
+                "spearman_rho": r,
+            })
+        rhos.sort(key=lambda t: abs(t[1]), reverse=True)
+        drivers_per_endpoint[(scen, ep)] = rhos[:top_k_drivers]
+
+    corr_df = pd.DataFrame(corr_rows)
+
+    if drivers_per_endpoint:
+        lines.append("")
+        scope = (
+            f"top {top_k_drivers} PRCC-significant drivers"
+            if prcc else f"top {top_k_drivers} drivers"
+        )
+        lines.append(f"### Driver attribution ({scope} per endpoint)\n")
+        lines.append("| Scenario | Endpoint | Driver (ρ) |")
+        lines.append("|----------|----------|-----------|")
+        for (scen, ep), drivers in sorted(drivers_per_endpoint.items()):
+            driver_str = " · ".join(
+                f"`{name}` ({rho:+.2f})" for name, rho in drivers
+            )
+            lines.append(f"| `{scen}` | `{ep}` | {driver_str} |")
+        lines.append("")
+
+    # ---- Side CSV exports -------------------------------------------------
+    if output_dir is not None:
+        notes_dir = output_dir.parent / "calibration" \
+            if output_dir.name != "calibration" else output_dir
+        # Prefer a sibling notes/calibration layout (standard pdac-build
+        # layout), but fall back to output_dir when the report is written
+        # outside a project tree.
+        if not notes_dir.exists():
+            notes_dir = output_dir
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        ci_path = notes_dir / "ppc_endpoint_ci.csv"
+        corr_path = notes_dir / "ppc_endpoint_correlations.csv"
+        ci_df.to_csv(ci_path, index=False)
+        if not corr_df.empty:
+            corr_df.to_csv(corr_path, index=False)
+        lines.append(
+            f"> CSV artifacts: `{ci_path.name}` (CI stats) · "
+            f"`{corr_path.name if not corr_df.empty else '(no correlations computed)'}` "
+            "(per-(endpoint, param) Spearman). Paths relative to the report's output dir.\n"
+        )
+    return lines
+
+
 def generate_report(
     priors: dict,
     targets: dict,
@@ -1559,6 +1795,9 @@ def generate_report(
     lines.extend(_section_component_diagnostics(comp_diags))
     lines.extend(_section_whats_left(priors, targets, groups, prcc, sbi_runs))
     lines.extend(_section_stage2_npe(priors, stage1_priors or {}, sbi_run))
+    lines.extend(
+        _section_predictive_uncertainty(sbi_run, priors, prcc, output_dir)
+    )
     lines.extend(_section_cross_model(priors, targets, compare_results, cross_model))
     return "\n".join(lines)
 
