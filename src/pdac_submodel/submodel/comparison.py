@@ -97,6 +97,27 @@ def _z_score(prior_mu: float, posterior_mu: float, prior_sigma: float) -> float:
     return abs(posterior_mu - prior_mu) / prior_sigma
 
 
+def _sample_from_prior(rng: np.random.Generator, spec: object) -> float:
+    """Draw a single sample from a PriorSpec or InlinePrior.
+
+    Supports lognormal, normal, and uniform distributions — the three shapes
+    allowed by :class:`PriorSpec` and :class:`InlinePrior`. QSP parameters
+    from the CSV are always lognormal, but inline nuisance priors can be
+    any of the three (e.g., a bounded fraction uses uniform(lower, upper)).
+    """
+    dist = getattr(spec, "distribution", "lognormal")
+    if dist == "lognormal":
+        return float(rng.lognormal(spec.mu, spec.sigma))
+    if dist == "normal":
+        return float(rng.normal(spec.mu, spec.sigma))
+    if dist == "uniform":
+        return float(rng.uniform(spec.lower, spec.upper))
+    raise ValueError(
+        f"Unsupported prior distribution {dist!r} for "
+        f"{getattr(spec, 'name', '<unknown>')}"
+    )
+
+
 def _build_structured_results(
     csv_priors: dict,
     joint_fits: dict,
@@ -975,18 +996,17 @@ def run_comparison(
                     for t in comp_targets:
                         for p in t.calibration.parameters:
                             if p.nuisance and p.prior:
-                                nuisance[p.name] = (p.prior.mu, p.prior.sigma)
+                                nuisance[p.name] = p.prior
                     rng = np.random.default_rng(42)
 
-                    # Prior predictive (sample from CSV priors)
+                    # Prior predictive (sample from CSV priors + inline nuisance priors)
                     prior_preds_all = [[] for _ in ppc_fns]
                     for i in range(n_ppc):
                         pd = {}
-                        for pn in comp_prior_specs:
-                            sp = comp_prior_specs[pn]
-                            pd[pn] = float(rng.lognormal(sp.mu, sp.sigma))
-                        for nn, (mu, sig) in nuisance.items():
-                            pd[nn] = float(rng.lognormal(mu, sig))
+                        for pn, sp in comp_prior_specs.items():
+                            pd[pn] = _sample_from_prior(rng, sp)
+                        for nn, ip in nuisance.items():
+                            pd[nn] = _sample_from_prior(rng, ip)
                         for obs_idx, fn in enumerate(ppc_fns):
                             try:
                                 prior_preds_all[obs_idx].append(float(fn(pd)))
@@ -1004,8 +1024,8 @@ def run_comparison(
                                 for pn in comp_samples
                                 if i < len(comp_samples[pn])
                             }
-                            for nn, (mu, sig) in nuisance.items():
-                                pd[nn] = float(rng.lognormal(mu, sig))
+                            for nn, ip in nuisance.items():
+                                pd[nn] = _sample_from_prior(rng, ip)
                             try:
                                 preds.append(float(fn(pd)))
                             except Exception:
