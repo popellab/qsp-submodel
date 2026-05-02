@@ -248,7 +248,7 @@ def test_run_component_npe_seeds_torch_rng() -> None:
     """
     import random as _random
 
-    import torch as _torch
+    _torch = pytest.importorskip("torch")
 
     # Mirror the seeding block from run_component_npe.
     def _seed_like_run_component_npe(seed: int) -> tuple[float, float]:
