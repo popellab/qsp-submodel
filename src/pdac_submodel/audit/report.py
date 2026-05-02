@@ -410,6 +410,11 @@ def load_joint_samples(cache_dir: Path) -> dict | None:
 
     Merges samples across all component_*.json files.
     Returns {param_name: list[float]} or None if no samples available.
+
+    NOTE: This flat view loses component-membership information. Callers
+    that need to group params by their inference component should use
+    :func:`load_joint_samples_by_component` instead — see the
+    docstring there for the bug this fixes.
     """
     if not cache_dir.exists():
         return None
@@ -436,6 +441,54 @@ def load_joint_samples(cache_dir: Path) -> dict | None:
             if pname not in all_samples:
                 all_samples[pname] = samps
     return all_samples if all_samples else None
+
+
+def load_joint_samples_by_component(cache_dir: Path) -> dict[str, dict] | None:
+    """Load posterior samples grouped by inference component.
+
+    Returns ``{component_id: {param_name: list[float]}}`` where
+    ``component_id`` is the cache file basename (e.g. ``"comp_a3f2b1c4"``)
+    or ``"joint_<id>"`` for legacy joint caches. Each top-level entry
+    corresponds to one independent submodel inference run, so params from
+    different entries are statistically independent given the prior — the
+    audit's composite copula must therefore be block-diagonal across
+    components.
+
+    The previous flat :func:`load_joint_samples` collapsed this structure,
+    which led ``_write_submodel_priors`` to bucket params by raw sample
+    length as a (broken) proxy for component membership and fit a Gaussian
+    copula across row-aligned independent samples. When NPE samplings
+    share RNG state across components, that row-alignment is comonotonic
+    coupling and the inferred copula entries spuriously approach |r| ≈ 1.
+
+    Returns ``None`` if no caches are present.
+    """
+    if not cache_dir.exists():
+        return None
+    by_component: dict[str, dict] = {}
+    for path in sorted(cache_dir.glob("comp_*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        samples = data.get("samples", {})
+        if not samples:
+            continue
+        by_component[path.stem] = {k: list(v) for k, v in samples.items()}
+    # Legacy joint_*.json format: each file is its own joint inference,
+    # so it's a single component with multiple correlated params.
+    for path in sorted(cache_dir.glob("joint_*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        samples = data.get("joint_samples", {})
+        if not samples:
+            continue
+        by_component[path.stem] = {k: list(v) for k, v in samples.items()}
+    return by_component if by_component else None
 
 
 def export_posterior_medians(cache_dir: Path) -> dict:
@@ -1808,7 +1861,7 @@ def generate_report(
 
 
 def _write_submodel_priors(
-    joint_samples: dict[str, list],
+    joint_samples_by_component: dict[str, dict],
     targets: dict[str, list[str]],
     groups: dict[str, str],
     output_path: Path,
@@ -1819,8 +1872,18 @@ def _write_submodel_priors(
     Uses fit_marginals and fit_gaussian_copula from the parameterizer module
     but avoids loading SubmodelTarget Pydantic objects.
 
+    The copula block is constructed **block-diagonally per inference
+    component**: params produced by the same ``comp_*.json`` cache file
+    share a copula block (their joint samples are genuine paired draws
+    from the same NPE/MCMC posterior); params from different cache files
+    are forced to zero off-diagonal correlation, since they were inferred
+    independently and their per-row alignment in the cache files is an
+    artifact of RNG state, not a real dependency.
+
     Args:
-        joint_samples: {param_name: list[float]} from load_joint_samples
+        joint_samples_by_component: ``{component_id: {param: list[float]}}``
+            from :func:`load_joint_samples_by_component`. Each top-level
+            key is a single submodel inference run.
         targets: {param_name: [target_ids]} from load_submodel_targets
         groups: {param_name: group_id} from load_parameter_groups
         output_path: Where to write submodel_priors.yaml
@@ -1836,12 +1899,28 @@ def _write_submodel_priors(
         write_priors_yaml,
     )
 
-    # Filter to non-nuisance, non-hyperparameter samples
-    output_samples = {
-        k: np.asarray(v)
-        for k, v in joint_samples.items()
-        if k in targets and "__" not in k
-    }
+    # Build a flat {param: samples} dict for marginal fitting + per-param
+    # serialization, plus a {param: component_id} map so we can enforce
+    # block-diagonal copula structure below.  Reject params whose name
+    # carries the nuisance/hyperparameter marker (``__``) or which lack
+    # an associated submodel target.
+    output_samples: dict[str, np.ndarray] = {}
+    param_to_component: dict[str, str] = {}
+    for comp_id, comp_samples in joint_samples_by_component.items():
+        for k, v in comp_samples.items():
+            if k not in targets or "__" in k:
+                continue
+            if k in output_samples:
+                # A param appears in multiple components only via cascade
+                # propagation; downstream stages re-sample the param under
+                # tighter conditions, so prefer the later (more
+                # informative) cache. ``sorted()`` over comp ids is
+                # deterministic; the last write wins.
+                output_samples[k] = np.asarray(v)
+                param_to_component[k] = comp_id
+            else:
+                output_samples[k] = np.asarray(v)
+                param_to_component[k] = comp_id
 
     if not output_samples:
         print("No posterior samples to parameterize — skipping submodel_priors.yaml")
@@ -1851,21 +1930,28 @@ def _write_submodel_priors(
 
     marginals = fit_marginals(output_samples)
 
-    # Build copula block-diagonally.  Parameters from different inference
-    # components are independent (inferred separately) so their correlation
-    # is exactly 0.  Group by sample length as a proxy for component
-    # membership — same-length samples are paired MCMC/NPE draws.
+    # Build copula block-diagonally by component_id.  Params from different
+    # components were inferred independently, so the correct off-diagonal
+    # correlation is exactly 0 by construction — never inferred from data.
+    # The previous implementation used ``len(samples)`` as a proxy for
+    # component membership, which silently merged independent components
+    # whenever they happened to share a posterior sample count and then
+    # fit a Gaussian copula across row-aligned independent draws. With
+    # shared RNG state across NPE samplings, that row-alignment imposes
+    # comonotonic coupling and the recovered copula entries spuriously
+    # approach |r| ≈ 1 — corrupting downstream stage-2 SBI by injecting
+    # near-deterministic prior dependencies between unrelated params.
     if len(param_names) > 1:
         from collections import defaultdict
 
-        size_groups: dict[int, list[str]] = defaultdict(list)
+        component_groups: dict[str, list[str]] = defaultdict(list)
         for n in param_names:
-            size_groups[len(output_samples[n])].append(n)
+            component_groups[param_to_component[n]].append(n)
 
         name_to_idx = {n: i for i, n in enumerate(param_names)}
         R = np.eye(len(param_names))
 
-        for group_names in size_groups.values():
+        for group_names in component_groups.values():
             if len(group_names) < 2:
                 continue
             block_matrix = np.column_stack(
@@ -2004,10 +2090,17 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
         output.write_text(report)
         print(f"Report written to {output}")
 
-    # Generate submodel_priors.yaml from joint posterior samples
+    # Generate submodel_priors.yaml from joint posterior samples.  Use the
+    # by-component view so the copula block is built block-diagonally per
+    # inference component (mixing components silently produces spurious
+    # near-r=1 correlations — see _write_submodel_priors docstring).
     if joint_samples:
-        priors_yaml_path = (output.parent if output else Path.cwd()) / "submodel_priors.yaml"
-        _write_submodel_priors(joint_samples, targets, groups, priors_yaml_path)
+        joint_samples_by_component = load_joint_samples_by_component(config.compare_cache)
+        if joint_samples_by_component:
+            priors_yaml_path = (output.parent if output else Path.cwd()) / "submodel_priors.yaml"
+            _write_submodel_priors(
+                joint_samples_by_component, targets, groups, priors_yaml_path
+            )
 
     return report
 
