@@ -1365,6 +1365,20 @@ def run_component_npe(
 
     rng = np.random.default_rng(seed)
 
+    # Seed torch + Python's random so the NPE flow's training init,
+    # base-distribution draws during posterior sampling, and any auxiliary
+    # randomness are component-deterministic. Without this, every component
+    # ends up with an identical torch RNG trajectory, which row-aligns the
+    # posterior samples written to comp_*.json and makes downstream copula
+    # construction (audit.report._write_submodel_priors) infer comonotonic
+    # coupling between params from independent components.
+    import random as _random
+
+    import torch as _torch
+
+    _torch.manual_seed(int(seed) & 0x7FFFFFFF)
+    _random.seed(int(seed) & 0x7FFFFFFF)
+
     # Collect QSP param names
     all_param_names = set()
     for t in targets:

@@ -608,6 +608,7 @@ def run_comparison(
     num_samples: int = 4000,
     parameter_groups_path: str | Path | None = None,
     invalidate_params: list[str] | None = None,
+    base_seed: int = 0,
 ) -> str:
     """Run component-wise NPE inference, return comparison report.
 
@@ -620,6 +621,14 @@ def run_comparison(
         invalidate_params: Optional list of parameter names. Any cached
             component containing at least one of these parameters will be
             deleted and re-run.
+        base_seed: Base RNG seed. Each component's NPE / NUTS run is
+            seeded with ``base_seed`` mixed with that component's
+            ``comp_id`` hash so independent components have independent
+            RNG trajectories. Same ``base_seed`` reproduces an identical
+            comp_*.json bit-for-bit; varying ``base_seed`` re-runs the
+            full pipeline. Defaults to 0 to match historical behavior
+            for a single component, but the per-component derivation
+            below still differentiates RNG state across components.
 
     Returns:
         Markdown-formatted comparison report.
@@ -888,6 +897,13 @@ def run_comparison(
 
             use_npe = has_ode if use_method is None else (use_method == "npe")
 
+            # Mix base_seed with the component's comp_id hash so each
+            # component gets an independent RNG trajectory. Without this,
+            # all components would share torch's RNG state and produce
+            # row-aligned posterior samples — which corrupts downstream
+            # copula construction in audit.report._write_submodel_priors.
+            comp_seed = (int(base_seed) + int(cci["comp_id"], 16)) & 0x7FFFFFFF
+
             try:
                 if use_npe:
                     # NPE for ODE components (gives SBC diagnostics)
@@ -901,6 +917,7 @@ def run_comparison(
                         comp_targets,
                         parameter_groups=comp_groups,
                         num_posterior_samples=num_samples,
+                        seed=comp_seed,
                     )
                 else:
                     # Multi-target, no ODE: NUTS is fast and exact
@@ -913,6 +930,7 @@ def run_comparison(
                         comp_prior_specs,
                         comp_targets,
                         parameter_groups=comp_groups,
+                        seed=comp_seed,
                         num_warmup=2000,
                         num_samples=num_samples,
                         num_chains=2,
@@ -1304,6 +1322,13 @@ def main():
         "--parameter-groups",
         help="Path to submodel_config.yaml (auto-discovered in submodel-dir if not set)",
     )
+    parser.add_argument(
+        "--base-seed",
+        type=int,
+        default=0,
+        help="Base RNG seed; per-component seeds are mixed in from comp_id "
+        "so independent components have independent RNG state.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -1314,6 +1339,7 @@ def main():
         glob_pattern=args.glob_pattern,
         num_samples=args.num_samples,
         parameter_groups_path=args.parameter_groups,
+        base_seed=args.base_seed,
     )
 
     if args.output:
