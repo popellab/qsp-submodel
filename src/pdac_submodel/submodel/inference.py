@@ -52,12 +52,17 @@ class PriorSpec:
     """Prior specification for a single parameter, loaded from CSV."""
 
     name: str
-    distribution: str  # "lognormal", "normal", "uniform"
+    distribution: str  # "lognormal", "normal", "uniform", "beta"
     units: str
     mu: Optional[float] = None
     sigma: Optional[float] = None
     lower: Optional[float] = None
     upper: Optional[float] = None
+    # Beta(a, b) shape parameters; populated when distribution == "beta".
+    # Stored on a separate field pair to keep the (mu, sigma) and
+    # (lower, upper) channels unambiguous for the other distributions.
+    a: Optional[float] = None
+    b: Optional[float] = None
 
 
 @dataclass
@@ -155,6 +160,7 @@ def load_priors_from_csv(csv_path: Path) -> dict[str, PriorSpec]:
     For lognormal: dist_param1=mu (log-space), dist_param2=sigma (log-space)
     For normal: dist_param1=mu, dist_param2=sigma
     For uniform: dist_param1=lower, dist_param2=upper
+    For beta:    dist_param1=a (alpha shape), dist_param2=b (beta shape)
     """
     import pandas as pd
 
@@ -188,6 +194,21 @@ def load_priors_from_csv(csv_path: Path) -> dict[str, PriorSpec]:
                 units=units,
                 lower=float(row["dist_param1"]),
                 upper=float(row["dist_param2"]),
+            )
+        elif dist == "beta":
+            a = float(row["dist_param1"])
+            b = float(row["dist_param2"])
+            if a <= 0 or b <= 0:
+                raise ValueError(
+                    f"Beta prior for '{name}' has non-positive shape parameters "
+                    f"(a={a}, b={b}); both must be > 0."
+                )
+            specs[name] = PriorSpec(
+                name=name,
+                distribution="beta",
+                units=units,
+                a=a,
+                b=b,
             )
         else:
             raise ValueError(f"Unknown distribution '{dist}' for parameter '{name}'")
@@ -916,6 +937,8 @@ def submodel_joint_model(prior_specs, target_likelihoods, parameter_groups=None)
             params[name] = numpyro.sample(name, dist.Normal(spec.mu, spec.sigma))
         elif spec.distribution == "uniform":
             params[name] = numpyro.sample(name, dist.Uniform(spec.lower, spec.upper))
+        elif spec.distribution == "beta":
+            params[name] = numpyro.sample(name, dist.Beta(spec.a, spec.b))
         else:
             raise ValueError(f"Unsupported prior distribution: {spec.distribution}")
 
@@ -1058,6 +1081,10 @@ def _compute_contraction_z(
         elif spec.distribution == "uniform":
             prior_mean = (spec.lower + spec.upper) / 2
             prior_var = (spec.upper - spec.lower) ** 2 / 12
+        elif spec.distribution == "beta":
+            a, b = spec.a, spec.b
+            prior_mean = a / (a + b)
+            prior_var = (a * b) / ((a + b) ** 2 * (a + b + 1))
         else:
             prior_mean = float(np.mean(flat_arr))
             prior_var = float(np.var(flat_arr))
@@ -1461,10 +1488,22 @@ def run_component_npe(
         if pname in param_in_group:
             continue
         spec = prior_specs.get(pname)
-        if spec:
-            theta[:, j] = rng.lognormal(spec.mu, spec.sigma, num_simulations)
-        else:
+        if spec is None:
             theta[:, j] = rng.lognormal(0, 1, num_simulations)
+            continue
+        if spec.distribution == "lognormal":
+            theta[:, j] = rng.lognormal(spec.mu, spec.sigma, num_simulations)
+        elif spec.distribution == "normal":
+            theta[:, j] = rng.normal(spec.mu, spec.sigma, num_simulations)
+        elif spec.distribution == "uniform":
+            theta[:, j] = rng.uniform(spec.lower, spec.upper, num_simulations)
+        elif spec.distribution == "beta":
+            theta[:, j] = rng.beta(spec.a, spec.b, num_simulations)
+        else:
+            raise ValueError(
+                f"Unsupported prior distribution '{spec.distribution}' for "
+                f"NPE prior sampling of parameter '{pname}'."
+            )
 
     # Grouped params: k_i = base_rate * exp(delta_i)
     for bp, member_indices, tau, delta_priors in group_sampling:
@@ -1541,17 +1580,32 @@ def run_component_npe(
     theta_tensor = torch.as_tensor(log_theta)
     x_tensor = torch.as_tensor(x_normed)
 
-    # Prior in log-space: diagonal Gaussian matching CSV lognormal priors (unbounded)
+    # Prior in log-space: diagonal Gaussian matching CSV priors. For
+    # lognormal this is exact (log of LogNormal(mu, sigma) is N(mu, sigma)).
+    # For normal/uniform/beta priors, we moment-match the empirical
+    # marginal of log(theta) under the actual prior — using the training
+    # samples already drawn at this point — so the NPE latent prior is a
+    # principled diagonal-Gaussian approximation rather than ignoring the
+    # CSV's distribution choice.
     prior_mus = []
     prior_sigmas = []
-    for pname in qsp_params:
+    for j, pname in enumerate(qsp_params):
         spec = prior_specs.get(pname)
-        if spec:
-            prior_mus.append(spec.mu)
-            prior_sigmas.append(spec.sigma)
-        else:
+        if spec is None:
             prior_mus.append(0.0)
             prior_sigmas.append(1.0)
+        elif spec.distribution == "lognormal":
+            prior_mus.append(float(spec.mu))
+            prior_sigmas.append(float(spec.sigma))
+        else:
+            # Moment-match log(theta) from training samples (mu_emp, sigma_emp)
+            log_col = log_theta_all[:, j]
+            mu_emp = float(np.mean(log_col))
+            sigma_emp = float(np.std(log_col))
+            if sigma_emp <= 0 or not np.isfinite(sigma_emp):
+                sigma_emp = 1.0
+            prior_mus.append(mu_emp)
+            prior_sigmas.append(sigma_emp)
     prior_dist = torch.distributions.Independent(
         torch.distributions.Normal(
             torch.tensor(prior_mus, dtype=torch.float32),
