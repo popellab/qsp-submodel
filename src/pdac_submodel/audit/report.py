@@ -2027,15 +2027,19 @@ def _write_submodel_priors(
         "n_samples": n_samples,
     }
     if freshness_by_component:
-        # Embed only freshness for components that contributed at least one
-        # surviving QSP parameter to the output. Components whose params were
-        # all filtered (nuisance / no submodel target) shouldn't gate
-        # checker behavior.
-        contributing_ids = {param_to_component[p] for p in param_names}
+        # Embed every component fingerprint we have on disk, not just those
+        # whose params won the ``param_to_component`` last-write-wins race.
+        # When a parameter appears in multiple cache files via cascade
+        # propagation, only one comp_id ends up in ``param_to_component``
+        # and the upstream cascade comps would otherwise be silently
+        # dropped — but their target YAML / prior CSV / config slice
+        # still drives the final posterior, so a checker needs to see
+        # them. ``_cleanup_orphaned_caches`` has already pruned anything
+        # that isn't an active component, so the dict is the right
+        # superset.
         metadata["freshness"] = {
             cid: freshness_by_component[cid]
-            for cid in sorted(contributing_ids)
-            if cid in freshness_by_component
+            for cid in sorted(freshness_by_component)
         }
     result = {
         "metadata": metadata,
