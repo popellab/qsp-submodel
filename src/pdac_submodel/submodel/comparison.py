@@ -27,6 +27,10 @@ from pathlib import Path
 
 import numpy as np
 
+from qsp_inference.submodel.freshness import (
+    compute_component_freshness as _compute_component_freshness,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -734,10 +738,27 @@ def run_comparison(
     # No content hashing — results persist until manually invalidated via
     # invalidate_params or by deleting .compare_cache/ files.
     comp_cache_info: list[dict] = []
+    submodel_config_path = (
+        submodel_dir / "submodel_config.yaml"
+        if (submodel_dir / "submodel_config.yaml").exists()
+        else None
+    )
     for comp in active_components:
         comp_params = comp["params"]
         comp_id = _compute_hash("\n".join(sorted(comp_params)))
         comp_cache_path = cache / f"comp_{comp_id}.json"
+
+        # Compute the per-component content fingerprint up-front so we can
+        # both stamp it onto fresh cache writes and surface staleness when
+        # an existing cache is reused. Cache identity (comp_id) is still
+        # parameter-set-only — the freshness manifest is informational.
+        freshness = _compute_component_freshness(
+            params=comp_params,
+            target_filenames=comp["target_filenames"],
+            submodel_dir=submodel_dir,
+            priors_csv=priors_csv,
+            submodel_config_path=submodel_config_path,
+        )
 
         comp_cache_info.append(
             {
@@ -745,6 +766,7 @@ def run_comparison(
                 "comp_id": comp_id,
                 "cache_path": comp_cache_path,
                 "cached": _load_cache(comp_cache_path),
+                "freshness": freshness,
             }
         )
 
@@ -819,6 +841,27 @@ def run_comparison(
 
             cached_comp = cci["cached"]
             if cached_comp is not None:
+                stored_freshness = cached_comp.get("freshness")
+                live_freshness = cci["freshness"]
+                if stored_freshness is None:
+                    logger.warning(
+                        "  Cache hit on %s has no freshness manifest "
+                        "(written before content fingerprinting was added). "
+                        "Re-run with --invalidate or rebuild to refresh.",
+                        comp_cache_path.name,
+                    )
+                elif stored_freshness.get("content_hash") != live_freshness.get(
+                    "content_hash"
+                ):
+                    logger.warning(
+                        "  Cache hit on %s is STALE: content_hash %s "
+                        "→ %s. Inputs changed since this component was last "
+                        "inferred. Re-run with --invalidate or delete the "
+                        "cache file to refresh.",
+                        comp_cache_path.name,
+                        stored_freshness.get("content_hash"),
+                        live_freshness.get("content_hash"),
+                    )
                 for k, v in cached_comp.get("fits", {}).items():
                     joint_fits[k] = v
                 comp_diag = cached_comp.get("diag", {})
@@ -1127,6 +1170,7 @@ def run_comparison(
                     "fits": comp_fits,
                     "diag": comp_diag,
                     "samples": comp_samples_list,
+                    "freshness": cci["freshness"],
                 },
             )
 

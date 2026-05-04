@@ -491,6 +491,28 @@ def load_joint_samples_by_component(cache_dir: Path) -> dict[str, dict] | None:
     return by_component if by_component else None
 
 
+def load_freshness_by_component(cache_dir: Path) -> dict[str, dict]:
+    """Load the freshness manifest stamped onto each ``comp_*.json``.
+
+    Returns ``{component_id: freshness_dict}``. Components written before
+    the freshness feature was added are simply absent from the result —
+    callers should treat that as "unknown freshness" and re-run inference.
+    """
+    if not cache_dir.exists():
+        return {}
+    out: dict[str, dict] = {}
+    for path in sorted(cache_dir.glob("comp_*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        freshness = data.get("freshness")
+        if freshness:
+            out[path.stem] = freshness
+    return out
+
+
 def export_posterior_medians(cache_dir: Path) -> dict:
     """Export posterior medians from component cache files.
 
@@ -1866,6 +1888,7 @@ def _write_submodel_priors(
     groups: dict[str, str],
     output_path: Path,
     copula_threshold: float = 0.05,
+    freshness_by_component: dict[str, dict] | None = None,
 ) -> None:
     """Write submodel_priors.yaml from cached joint posterior samples.
 
@@ -1998,12 +2021,24 @@ def _write_submodel_priors(
         }
 
     n_samples = len(next(iter(output_samples.values())))
+    metadata: dict = {
+        "generated_by": "qsp_inference.audit.report",
+        "n_parameters": len(param_names),
+        "n_samples": n_samples,
+    }
+    if freshness_by_component:
+        # Embed only freshness for components that contributed at least one
+        # surviving QSP parameter to the output. Components whose params were
+        # all filtered (nuisance / no submodel target) shouldn't gate
+        # checker behavior.
+        contributing_ids = {param_to_component[p] for p in param_names}
+        metadata["freshness"] = {
+            cid: freshness_by_component[cid]
+            for cid in sorted(contributing_ids)
+            if cid in freshness_by_component
+        }
     result = {
-        "metadata": {
-            "generated_by": "qsp_inference.audit.report",
-            "n_parameters": len(param_names),
-            "n_samples": n_samples,
-        },
+        "metadata": metadata,
         "parameters": parameters,
     }
     if copula_block:
@@ -2098,8 +2133,13 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
         joint_samples_by_component = load_joint_samples_by_component(config.compare_cache)
         if joint_samples_by_component:
             priors_yaml_path = (output.parent if output else Path.cwd()) / "submodel_priors.yaml"
+            freshness_by_component = load_freshness_by_component(config.compare_cache)
             _write_submodel_priors(
-                joint_samples_by_component, targets, groups, priors_yaml_path
+                joint_samples_by_component,
+                targets,
+                groups,
+                priors_yaml_path,
+                freshness_by_component=freshness_by_component,
             )
 
     return report
