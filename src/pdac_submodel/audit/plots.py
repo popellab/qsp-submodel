@@ -126,9 +126,18 @@ def _ci_to_lognorm(med, ci):
 # ---------------------------------------------------------------------------
 
 
+_RESERVED_YAML_NAMES = frozenset({
+    "submodel_config.yaml",
+    "compare_inference_results.yaml",
+    "submodel_priors.yaml",
+})
+
+
 def plot_inference_dag(
     submodel_dir: Path,
     output_dir: Path,
+    *,
+    glob_pattern: str = "*.yaml",
 ) -> Path | None:
     """Draw the full component inference DAG.
 
@@ -136,6 +145,14 @@ def plot_inference_dag(
     cluster contains parameter nodes (boxes) and target nodes (ellipses)
     with edges showing which targets constrain which parameters.
     Independent single-target components are arranged in a grid sub-cluster.
+
+    Args:
+        submodel_dir: Directory containing SubmodelTarget YAML files plus
+            optional ``submodel_config.yaml`` (parameter groups, cascade cuts)
+            and ``compare_inference_results.yaml`` (for cascade edge labels).
+        output_dir: Where the rendered PNG / SVG go.
+        glob_pattern: Pattern to match SubmodelTarget YAMLs. Reserved config /
+            results filenames are filtered out automatically.
     """
     import graphviz
     import yaml as _yaml
@@ -148,12 +165,12 @@ def plot_inference_dag(
     from qsp_inference.submodel.parameter_groups import load_parameter_groups
 
     param_groups = load_parameter_groups(submodel_dir / "submodel_config.yaml")
-    if not param_groups.cascade_cuts:
-        return None
 
     # Parse targets — _lightweight_parse accepts dicts or raw YAML strings
     lightweight_targets = []
-    for yf in sorted(submodel_dir.glob("*_PDAC_deriv*.yaml")):
+    for yf in sorted(submodel_dir.glob(glob_pattern)):
+        if yf.name in _RESERVED_YAML_NAMES:
+            continue
         try:
             with open(yf) as f:
                 data = _yaml.safe_load(f)
@@ -164,17 +181,19 @@ def plot_inference_dag(
         except Exception:
             continue
 
+    if not lightweight_targets:
+        return None
+
     cascade_cut_params = frozenset(param_groups.cascade_cut_params)
     components = _find_components_lightweight(
         lightweight_targets, param_groups, cascade_cut_params
     )
     active = [c for c in components if c["target_filenames"]]
+    if not active:
+        return None
     stages, cascade_edges = _build_stage_dag(
         active, param_groups.cascade_cuts, lightweight_targets
     )
-
-    if len(stages) <= 1:
-        return None
 
     # Build lookups
     fname_to_tid = {lt["filename"]: lt["target_id"] for lt in lightweight_targets}
@@ -194,8 +213,7 @@ def plot_inference_dag(
                   "steady_state_ratio": "SS", "power_law": "pow"}
 
     def _short_tid(tid):
-        s = tid.replace("_PDAC_deriv001", "").replace("_PDAC_deriv002", "")
-        return s[:28] + ".." if len(s) > 28 else s
+        return tid[:28] + ".." if len(tid) > 28 else tid
 
     # Param → group
     param_to_group = {}
