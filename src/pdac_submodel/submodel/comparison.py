@@ -104,10 +104,10 @@ def _z_score(prior_mu: float, posterior_mu: float, prior_sigma: float) -> float:
 def _sample_from_prior(rng: np.random.Generator, spec: object) -> float:
     """Draw a single sample from a PriorSpec or InlinePrior.
 
-    Supports lognormal, normal, and uniform distributions — the three shapes
+    Supports lognormal, normal, uniform, and beta distributions — the shapes
     allowed by :class:`PriorSpec` and :class:`InlinePrior`. QSP parameters
-    from the CSV are always lognormal, but inline nuisance priors can be
-    any of the three (e.g., a bounded fraction uses uniform(lower, upper)).
+    from the CSV are usually lognormal, but a bounded fraction can use
+    beta(a, b), and inline nuisance priors can be uniform(lower, upper).
     """
     dist = getattr(spec, "distribution", "lognormal")
     if dist == "lognormal":
@@ -116,6 +116,8 @@ def _sample_from_prior(rng: np.random.Generator, spec: object) -> float:
         return float(rng.normal(spec.mu, spec.sigma))
     if dist == "uniform":
         return float(rng.uniform(spec.lower, spec.upper))
+    if dist == "beta":
+        return float(rng.beta(spec.a, spec.b))
     raise ValueError(
         f"Unsupported prior distribution {dist!r} for "
         f"{getattr(spec, 'name', '<unknown>')}"
