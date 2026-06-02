@@ -64,10 +64,20 @@ class TestLoadPriorsFromCsvBeta:
         assert spec.a == pytest.approx(2.0)
         assert spec.b == pytest.approx(18.0)
         assert spec.units == "dimensionless"
-        # mu/sigma not used for beta — should remain None (vs. silently
-        # being interpreted as Normal parameters).
-        assert spec.mu is None
-        assert spec.sigma is None
+        # mu/sigma are populated with the *exact log-space moments* of
+        # Beta(a, b) so the lognormal-based contraction / z-score diagnostics
+        # work unchanged. They are NOT used for sampling (every sampling site
+        # dispatches on `distribution` and uses (a, b) directly), so there is
+        # no risk of beta being silently treated as Normal.
+        #   E[log X]   = psi(a)  - psi(a+b)
+        #   Var[log X] = psi'(a) - psi'(a+b)
+        from scipy.special import digamma, polygamma
+
+        a, b = 2.0, 18.0
+        assert spec.mu == pytest.approx(float(digamma(a) - digamma(a + b)))
+        assert spec.sigma == pytest.approx(
+            float(np.sqrt(polygamma(1, a) - polygamma(1, a + b)))
+        )
 
     def test_beta_with_nonpositive_shape_rejected(self, tmp_path: Path) -> None:
         from qsp_inference.submodel.inference import load_priors_from_csv
@@ -141,6 +151,24 @@ class TestBetaSamplerInPriorPredictive:
         expected_var = (a * b) / ((a + b) ** 2 * (a + b + 1))
         assert abs(samples.mean() - expected_mean) < 0.01
         assert abs(samples.std() - np.sqrt(expected_var)) < 0.01
+
+
+class TestSampleFromPriorBeta:
+    """_sample_from_prior draws a genuine Beta variate for beta priors."""
+
+    def test_sample_from_prior_beta_in_unit_interval(self) -> None:
+        from qsp_inference.submodel.comparison import _sample_from_prior
+        from qsp_inference.submodel.inference import PriorSpec
+
+        spec = PriorSpec(
+            name="emax", distribution="beta", units="dimensionless", a=8.0, b=2.0
+        )
+        rng = np.random.default_rng(0)
+        draws = np.array([_sample_from_prior(rng, spec) for _ in range(5_000)])
+        # Genuine Beta(8, 2) draws: bounded in (0, 1), centered near 0.8.
+        assert (draws > 0).all()
+        assert (draws < 1).all()
+        assert abs(draws.mean() - 8.0 / 10.0) < 0.02
 
 
 class TestPriorMomentsBeta:
