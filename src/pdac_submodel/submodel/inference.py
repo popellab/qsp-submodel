@@ -203,12 +203,26 @@ def load_priors_from_csv(csv_path: Path) -> dict[str, PriorSpec]:
                     f"Beta prior for '{name}' has non-positive shape parameters "
                     f"(a={a}, b={b}); both must be > 0."
                 )
+            # Populate (mu, sigma) with the *exact* log-space moments of
+            # Beta(a, b) so the lognormal-based contraction / z-score
+            # diagnostics (comparison.py) — which compare a lognormal-fit
+            # posterior sigma against the prior in log-space — work unchanged.
+            #   E[log X]   = psi(a)  - psi(a+b)
+            #   Var[log X] = psi'(a) - psi'(a+b)
+            # Sampling sites dispatch on `distribution` and use (a, b)
+            # directly, so these never feed the actual Beta draw.
+            from scipy.special import digamma, polygamma
+
+            log_mu = float(digamma(a) - digamma(a + b))
+            log_sigma = float(np.sqrt(polygamma(1, a) - polygamma(1, a + b)))
             specs[name] = PriorSpec(
                 name=name,
                 distribution="beta",
                 units=units,
                 a=a,
                 b=b,
+                mu=log_mu,
+                sigma=log_sigma,
             )
         else:
             raise ValueError(f"Unknown distribution '{dist}' for parameter '{name}'")
