@@ -1186,7 +1186,7 @@ def run_joint_inference(
     try:
         import jax
         import jax.random
-        from numpyro.infer import MCMC, NUTS
+        from numpyro.infer import MCMC, NUTS, init_to_median
     except ImportError as e:
         raise ImportError(
             "JAX and NumPyro are required for inference. "
@@ -1217,8 +1217,22 @@ def run_joint_inference(
         f"{len(targets)} targets, {n_likelihood_terms} likelihood terms"
     )
 
-    # Run MCMC
-    kernel = NUTS(submodel_joint_model, dense_mass=True, target_accept_prob=0.9)
+    # Run MCMC.
+    # init_to_median: start each chain at the prior median rather than numpyro's
+    # default init_to_uniform, which samples the unconstrained latent in (-2, 2)
+    # IGNORING the prior location (mu). For a LogNormal(mu, sigma) that means init
+    # draws k = exp(z), z ~ U(-2, 2) ≈ [0.14, 7.4] regardless of mu — fine for gentle
+    # forwards, but for a steep forward (e.g. a Hahnfeldt surface-term decay where the
+    # exponent multiplier is ~10^3) every such init underflows the observable to 0,
+    # giving log-density -inf and "Cannot find valid initial parameters". Anchoring on
+    # the prior median keeps init in the physically meaningful region for any prior
+    # scale; for well-specified submodels it is at least as good as init_to_uniform.
+    kernel = NUTS(
+        submodel_joint_model,
+        dense_mass=True,
+        target_accept_prob=0.9,
+        init_strategy=init_to_median,
+    )
     print(
         f"MCMC ({num_warmup} warmup + {num_samples} samples, {num_chains} chains)...",
         flush=True,
