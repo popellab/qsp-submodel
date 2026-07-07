@@ -491,6 +491,36 @@ def load_joint_samples_by_component(cache_dir: Path) -> dict[str, dict] | None:
     return by_component if by_component else None
 
 
+def load_population_samples_by_component(cache_dir: Path) -> dict[str, dict] | None:
+    """Load the population-scale posterior samples grouped by component.
+
+    Mirrors :func:`load_joint_samples_by_component` but reads the
+    ``population_samples`` block written by ``run_comparison(
+    run_population_pass=True)`` — the Option-A second-pass posteriors that
+    condition on genuine across-unit spread rather than the SEM-scale
+    center. These feed the audit's parallel population (ω) copula block.
+
+    Only components produced with the population pass carry this block, so a
+    ``comp_*.json`` without ``population_samples`` is skipped. Returns
+    ``None`` if no component carries population samples (i.e. the population
+    pass was never run) — the audit then emits only the center block.
+    """
+    if not cache_dir.exists():
+        return None
+    by_component: dict[str, dict] = {}
+    for path in sorted(cache_dir.glob("comp_*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        samples = data.get("population_samples", {})
+        if not samples:
+            continue
+        by_component[path.stem] = {k: list(v) for k, v in samples.items()}
+    return by_component if by_component else None
+
+
 def load_freshness_by_component(cache_dir: Path) -> dict[str, dict]:
     """Load the freshness manifest stamped onto each ``comp_*.json``.
 
@@ -2074,7 +2104,7 @@ def _write_submodel_priors(
 # ---------------------------------------------------------------------------
 
 
-def _run_inference(config: AuditConfig, invalidate_params=None):
+def _run_inference(config: AuditConfig, invalidate_params=None, run_population_pass=False):
     """Run component-wise inference to generate/update cached results."""
     from qsp_inference.submodel.comparison import run_comparison
 
@@ -2086,6 +2116,7 @@ def _run_inference(config: AuditConfig, invalidate_params=None):
         submodel_dir=str(config.submodel_dir),
         num_samples=4000,
         invalidate_params=invalidate_params,
+        run_population_pass=run_population_pass,
     )
     print("Done.")
 
@@ -2155,12 +2186,16 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
         if joint_samples_by_component:
             priors_yaml_path = (output.parent if output else Path.cwd()) / "submodel_priors.yaml"
             freshness_by_component = load_freshness_by_component(config.compare_cache)
+            population_samples_by_component = load_population_samples_by_component(
+                config.compare_cache
+            )
             _write_submodel_priors(
                 joint_samples_by_component,
                 targets,
                 groups,
                 priors_yaml_path,
                 freshness_by_component=freshness_by_component,
+                population_samples_by_component=population_samples_by_component,
             )
 
     return report

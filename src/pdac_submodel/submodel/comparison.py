@@ -82,6 +82,22 @@ def _load_cache(path: Path) -> dict | None:
         return None
 
 
+def _component_feeds_population_spread(comp_targets) -> bool:
+    """True if any error_model entry in the component carries an
+    ``observed_distribution`` whose spread feeds the population magnitude (ω).
+
+    These are the only components that need the second, population-scale
+    inference pass — everything else has ``population == center`` and just
+    copies the center-scale samples forward.
+    """
+    for t in comp_targets:
+        for entry in t.calibration.error_model:
+            od = getattr(entry, "observed_distribution", None)
+            if od is not None and od.feeds_population_spread:
+                return True
+    return False
+
+
 def _contraction(prior_sigma: float, posterior_sigma: float) -> float:
     """Compute contraction: 1 - (posterior_sigma / prior_sigma)^2.
 
@@ -615,6 +631,7 @@ def run_comparison(
     parameter_groups_path: str | Path | None = None,
     invalidate_params: list[str] | None = None,
     base_seed: int = 0,
+    run_population_pass: bool = False,
 ) -> str:
     """Run component-wise NPE inference, return comparison report.
 
@@ -635,6 +652,17 @@ def run_comparison(
             full pipeline. Defaults to 0 to match historical behavior
             for a single component, but the per-component derivation
             below still differentiates RNG state across components.
+        run_population_pass: When True, additionally run a second,
+            population-scale inference pass (Option A) for every component
+            that carries an ``observed_distribution`` feeding population
+            spread. The population posterior conditions on the target's
+            genuine across-unit spread (via ``build_target_likelihoods(
+            population_scale=True)``) rather than the SEM-scale center, and
+            its samples are stashed under ``population_samples`` in each
+            ``comp_*.json`` for the audit's parallel ω-copula block. This is
+            a *second* MCMC per pop-spread component, so it is opt-in on
+            compute cost, not correctness. Components with no population
+            spread simply copy their center-scale samples forward.
 
     Returns:
         Markdown-formatted comparison report.
@@ -800,6 +828,14 @@ def run_comparison(
         stages = [list(range(len(active_components)))]
         cascade_edges = {}
 
+    # The population pass needs each cached component's targets validated so we
+    # can tell up front whether it feeds population spread (and thus needs the
+    # second MCMC). Validation is a cheap Pydantic parse — it does NOT force a
+    # re-run; cache hits stay cache hits.
+    if run_population_pass:
+        for comp in active_components:
+            filenames_needing_validation.update(comp["target_filenames"])
+
     n_cached = sum(1 for cci in comp_cache_info if cci["cached"] is not None)
     n_total_targets = sum(len(c["target_filenames"]) for c in active_components)
     logger.info(
@@ -820,6 +856,30 @@ def run_comparison(
             validated_targets[fname] = target
         except Exception as e:
             logger.warning("Failed to validate %s: %s", fname, e)
+
+    # ── Population pass: force re-run of pop-spread components missing ω samples ──
+    # A cached component that feeds population spread but has no
+    # ``population_samples`` predates this pass (or was built with it off).
+    # Drop the cache hit so the re-run path below computes both scales.
+    # Components that don't feed pop spread keep their cache hit and get
+    # ``population_samples = center`` written in the cache-hit branch.
+    if run_population_pass:
+        for cci in comp_cache_info:
+            cached = cci["cached"]
+            if cached is None or "population_samples" in cached:
+                continue
+            comp_targets = [
+                validated_targets[f]
+                for f in cci["comp"]["target_filenames"]
+                if f in validated_targets
+            ]
+            if _component_feeds_population_spread(comp_targets):
+                cci["cached"] = None
+                cci["cache_path"].unlink(missing_ok=True)
+                logger.info(
+                    "Population pass: invalidated %s (missing population_samples)",
+                    cci["cache_path"].name,
+                )
 
     # ── Staged execution ──
     # Components run stage-by-stage. After each stage, cascade cut posteriors
@@ -883,6 +943,13 @@ def run_comparison(
                     joint_diag["ppc_n_covered"] = joint_diag.get(
                         "ppc_n_covered", 0
                     ) + comp_diag.get("ppc_n_covered", 0)
+                # Population pass: any cache hit that survives to here does NOT
+                # feed population spread (pop-spread caches missing ω samples
+                # were invalidated pre-loop). Its population == center, so
+                # backfill population_samples with the center samples if absent.
+                if run_population_pass and "population_samples" not in cached_comp:
+                    cached_comp["population_samples"] = cached_comp.get("samples", {})
+                    _save_cache(comp_cache_path, cached_comp)
                 continue
 
             # Resolve validated SubmodelTarget objects for this component
@@ -983,6 +1050,45 @@ def run_comparison(
             except Exception as e:
                 logger.warning("  Component %d failed: %s", ci + 1, e)
                 continue
+
+            # ── Population-scale pass (Option A) ──
+            # Default: population == center (no widening). Only components with
+            # an observed_distribution feeding population spread pay a second
+            # MCMC that conditions on the genuine across-unit spread.
+            pop_samples = comp_samples
+            if run_population_pass and _component_feeds_population_spread(comp_targets):
+                if use_npe:
+                    logger.warning(
+                        "  Component %d feeds population spread but uses NPE "
+                        "(ODE forward model) — population widening is not yet "
+                        "supported for NPE; using center-scale samples for ω.",
+                        ci + 1,
+                    )
+                else:
+                    from qsp_inference.submodel.inference import (
+                        run_joint_inference,
+                    )
+
+                    logger.info("    (population-scale MCMC — %d targets)", n_t)
+                    try:
+                        pop_samples, _ = run_joint_inference(
+                            comp_prior_specs,
+                            comp_targets,
+                            parameter_groups=comp_groups,
+                            seed=comp_seed ^ 0x50F0,
+                            num_warmup=2000,
+                            num_samples=num_samples,
+                            num_chains=2,
+                            population_scale=True,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "  Component %d population pass failed (%s); "
+                            "falling back to center samples for ω.",
+                            ci + 1,
+                            e,
+                        )
+                        pop_samples = comp_samples
 
             # Fit distributions and accumulate
             comp_fits = {}
@@ -1166,15 +1272,17 @@ def run_comparison(
             for k, v in comp_samples_list.items():
                 joint_samples_all[k] = v
 
-            _save_cache(
-                comp_cache_path,
-                {
-                    "fits": comp_fits,
-                    "diag": comp_diag,
-                    "samples": comp_samples_list,
-                    "freshness": cci["freshness"],
-                },
-            )
+            cache_payload = {
+                "fits": comp_fits,
+                "diag": comp_diag,
+                "samples": comp_samples_list,
+                "freshness": cci["freshness"],
+            }
+            if run_population_pass:
+                cache_payload["population_samples"] = {
+                    k: list(v) for k, v in pop_samples.items()
+                }
+            _save_cache(comp_cache_path, cache_payload)
 
         # After each stage: extract posteriors for cascade params and build
         # priors for downstream stages
