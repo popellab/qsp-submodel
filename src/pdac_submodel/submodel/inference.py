@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -268,6 +269,64 @@ def _run_bootstrap(entry, inputs_dict: dict[str, float]) -> DistFit:
         )
 
     return fits[0]
+
+
+# =============================================================================
+# Population-scale observation likelihood (Option A: population-spread export)
+# =============================================================================
+
+_Z_Q = 0.6744897501960817  # Phi^-1(0.75): quartile z-multiplier
+
+# Population-spread translation widening from source_relevance.heterogeneity_transfer.
+# The omega-side analog of the center-side translation rubric (compute_translation_sigma):
+# how much to widen the population spread beyond the source's own biological spread to
+# reflect target-population diversity the source's donors/animals do not capture. Applied
+# ONLY on the population-scale pass, and ONLY to the spread (never the center).
+HETEROGENEITY_SIGMA = {
+    "high": 0.0,  # source spread spans the target population; no widening
+    "moderate": 0.3,  # partial coverage (healthy donors, a few cell lines, outbred animals)
+    "low": 0.6,  # homogeneous system (single line, inbred strain); large widening
+}
+
+
+def _population_obs_from_distribution(entry, target) -> Optional[tuple]:
+    """Population-scale observation likelihood from an entry's ``observed_distribution``.
+
+    Returns ``(value, sigma, family)`` for entries whose ``observed_distribution``
+    declares a genuine population spread; ``None`` otherwise (the caller then falls
+    back to the SEM-scale ``observation_code`` bootstrap).
+
+    This is the population pass of Option A: the SAME forward model is fit against the
+    wider, *declared* population spread instead of the center-only observation_code, so
+    the resulting parameter posterior comes out population-scale. ``heterogeneity_transfer``
+    widens the observable spread further (in quadrature, log-space) to cover
+    target-population diversity the source does not span. The center (value) is unchanged.
+    """
+    od = getattr(entry, "observed_distribution", None)
+    if od is None or not od.feeds_population_spread:
+        return None
+
+    value = od.median()
+    q25 = od.quantile(0.25)
+    q75 = od.quantile(0.75)
+
+    if value > 0 and q25 > 0 and q75 > 0:
+        sigma = math.log(q75 / q25) / (2.0 * _Z_Q)
+        family = "lognormal"
+    else:  # non-positive support -> linear spread
+        sigma = (q75 - q25) / (2.0 * _Z_Q)
+        family = "normal"
+
+    # Omega-only translation widening (heterogeneity_transfer), from the primary source.
+    het = getattr(target.primary_data_source.source_relevance, "heterogeneity_transfer", None)
+    if het is not None:
+        w = HETEROGENEITY_SIGMA.get(het.value, 0.3)
+        if family == "lognormal":
+            sigma = math.sqrt(sigma**2 + w**2)
+        else:
+            sigma = math.sqrt(sigma**2 + (w * abs(value)) ** 2)
+
+    return value, sigma, family
 
 
 # =============================================================================
@@ -820,6 +879,7 @@ def build_target_likelihoods(
     targets: list[SubmodelTarget],
     prior_specs: dict[str, PriorSpec],
     reference_db: Optional[dict[str, float]] = None,
+    population_scale: bool = False,
 ) -> list[TargetLikelihood]:
     """Build likelihood specifications from targets.
 
@@ -831,6 +891,12 @@ def build_target_likelihoods(
 
     Validates that all non-nuisance parameter names exist in prior_specs.
     Injects nuisance parameters' inline priors into prior_specs.
+
+    When ``population_scale`` is True (Option A), any error_model entry carrying an
+    ``observed_distribution`` with a genuine population spread is fit against that wider,
+    declared spread (widened by ``heterogeneity_transfer``) instead of the center-only
+    ``observation_code`` bootstrap — so the parameter posterior comes out population-scale.
+    Entries without such an ``observed_distribution`` are unaffected (still SEM-scale).
     """
     import time
 
@@ -889,6 +955,16 @@ def build_target_likelihoods(
                 sigma = dist_fit.params.get("sigma", dist_fit.cv * dist_fit.median)
                 family = "normal"
 
+            value = dist_fit.median
+
+            # Option A: on the population pass, replace the center-only bootstrap width
+            # with the declared population spread from observed_distribution (center
+            # unchanged). Entries without a population observed_distribution stay SEM-scale.
+            if population_scale:
+                pop = _population_obs_from_distribution(entry, target)
+                if pop is not None:
+                    value, sigma, family = pop
+
             # Per-measurement translation sigma from sources of its inputs
             entry_sigma_trans, entry_sigma_breakdown = resolve_per_measurement_sigma(
                 target, entry.uses_inputs
@@ -897,7 +973,7 @@ def build_target_likelihoods(
             entries.append(
                 ErrorModelEntry(
                     forward_fn=forward_fns[j],
-                    value=dist_fit.median,
+                    value=value,
                     sigma=sigma,
                     family=family,
                     fit=dist_fit,
@@ -1165,6 +1241,7 @@ def run_joint_inference(
     num_samples: int = 5000,
     num_chains: int = 4,
     seed: int = 0,
+    population_scale: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Run joint MCMC inference across all SubmodelTargets.
 
@@ -1205,7 +1282,9 @@ def run_joint_inference(
 
     # Build target likelihoods (runs bootstrap, builds forward fns)
     t0 = _time.perf_counter()
-    target_likelihoods = build_target_likelihoods(targets, prior_specs, reference_db)
+    target_likelihoods = build_target_likelihoods(
+        targets, prior_specs, reference_db, population_scale=population_scale
+    )
     t_build = _time.perf_counter() - t0
 
     n_likelihood_terms = sum(len(tl.entries) for tl in target_likelihoods)

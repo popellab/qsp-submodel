@@ -1882,35 +1882,19 @@ def generate_report(
 # ---------------------------------------------------------------------------
 
 
-def _write_submodel_priors(
-    joint_samples_by_component: dict[str, dict],
+def _marginals_and_copula(
+    samples_by_component: dict[str, dict],
     targets: dict[str, list[str]],
     groups: dict[str, str],
-    output_path: Path,
-    copula_threshold: float = 0.05,
-    freshness_by_component: dict[str, dict] | None = None,
-) -> None:
-    """Write submodel_priors.yaml from cached joint posterior samples.
+    copula_threshold: float,
+) -> tuple[list[dict], dict | None, int]:
+    """Fit per-param marginals + a block-diagonal Gaussian copula from component samples.
 
-    Uses fit_marginals and fit_gaussian_copula from the parameterizer module
-    but avoids loading SubmodelTarget Pydantic objects.
-
-    The copula block is constructed **block-diagonally per inference
-    component**: params produced by the same ``comp_*.json`` cache file
-    share a copula block (their joint samples are genuine paired draws
-    from the same NPE/MCMC posterior); params from different cache files
-    are forced to zero off-diagonal correlation, since they were inferred
-    independently and their per-row alignment in the cache files is an
-    artifact of RNG state, not a real dependency.
-
-    Args:
-        joint_samples_by_component: ``{component_id: {param: list[float]}}``
-            from :func:`load_joint_samples_by_component`. Each top-level
-            key is a single submodel inference run.
-        targets: {param_name: [target_ids]} from load_submodel_targets
-        groups: {param_name: group_id} from load_parameter_groups
-        output_path: Where to write submodel_priors.yaml
-        copula_threshold: Minimum |correlation| to include in copula
+    Shared by the center pass and the population pass so both produce identically
+    structured ``parameters`` / ``copula`` blocks. Returns
+    ``(parameters, copula_block_or_None, n_samples)``; ``parameters`` is empty when
+    there are no usable samples. Copula is block-diagonal by inference component
+    (params from different components are independent — off-diagonal forced to 0).
     """
     import numpy as np
 
@@ -1919,51 +1903,23 @@ def _write_submodel_priors(
         fit_gaussian_copula,
         fit_marginals,
         threshold_copula,
-        write_priors_yaml,
     )
 
-    # Build a flat {param: samples} dict for marginal fitting + per-param
-    # serialization, plus a {param: component_id} map so we can enforce
-    # block-diagonal copula structure below.  Reject params whose name
-    # carries the nuisance/hyperparameter marker (``__``) or which lack
-    # an associated submodel target.
     output_samples: dict[str, np.ndarray] = {}
     param_to_component: dict[str, str] = {}
-    for comp_id, comp_samples in joint_samples_by_component.items():
+    for comp_id, comp_samples in samples_by_component.items():
         for k, v in comp_samples.items():
             if k not in targets or "__" in k:
                 continue
-            if k in output_samples:
-                # A param appears in multiple components only via cascade
-                # propagation; downstream stages re-sample the param under
-                # tighter conditions, so prefer the later (more
-                # informative) cache. ``sorted()`` over comp ids is
-                # deterministic; the last write wins.
-                output_samples[k] = np.asarray(v)
-                param_to_component[k] = comp_id
-            else:
-                output_samples[k] = np.asarray(v)
-                param_to_component[k] = comp_id
+            output_samples[k] = np.asarray(v)
+            param_to_component[k] = comp_id
 
     if not output_samples:
-        print("No posterior samples to parameterize — skipping submodel_priors.yaml")
-        return
+        return [], None, 0
 
     param_names = sorted(output_samples.keys())
-
     marginals = fit_marginals(output_samples)
 
-    # Build copula block-diagonally by component_id.  Params from different
-    # components were inferred independently, so the correct off-diagonal
-    # correlation is exactly 0 by construction — never inferred from data.
-    # The previous implementation used ``len(samples)`` as a proxy for
-    # component membership, which silently merged independent components
-    # whenever they happened to share a posterior sample count and then
-    # fit a Gaussian copula across row-aligned independent draws. With
-    # shared RNG state across NPE samplings, that row-alignment imposes
-    # comonotonic coupling and the recovered copula entries spuriously
-    # approach |r| ≈ 1 — corrupting downstream stage-2 SBI by injecting
-    # near-deterministic prior dependencies between unrelated params.
     if len(param_names) > 1:
         from collections import defaultdict
 
@@ -1977,9 +1933,7 @@ def _write_submodel_priors(
         for group_names in component_groups.values():
             if len(group_names) < 2:
                 continue
-            block_matrix = np.column_stack(
-                [output_samples[n] for n in group_names]
-            )
+            block_matrix = np.column_stack([output_samples[n] for n in group_names])
             block_cdfs = [_build_marginal_cdf(marginals[n]) for n in group_names]
             R_block = fit_gaussian_copula(block_matrix, block_cdfs)
             for bi, ni in enumerate(group_names):
@@ -1991,7 +1945,6 @@ def _write_submodel_priors(
         R_thresh = np.array([[1.0]])
         copula_params = []
 
-    # Assemble result
     parameters = []
     for name in param_names:
         fit = marginals[name]
@@ -2021,6 +1974,53 @@ def _write_submodel_priors(
         }
 
     n_samples = len(next(iter(output_samples.values())))
+    return parameters, copula_block, n_samples
+
+
+def _write_submodel_priors(
+    joint_samples_by_component: dict[str, dict],
+    targets: dict[str, list[str]],
+    groups: dict[str, str],
+    output_path: Path,
+    copula_threshold: float = 0.05,
+    freshness_by_component: dict[str, dict] | None = None,
+    population_samples_by_component: dict[str, dict] | None = None,
+) -> None:
+    """Write submodel_priors.yaml from cached joint posterior samples.
+
+    Uses fit_marginals and fit_gaussian_copula from the parameterizer module
+    but avoids loading SubmodelTarget Pydantic objects.
+
+    The copula block is constructed **block-diagonally per inference
+    component**: params produced by the same ``comp_*.json`` cache file
+    share a copula block (their joint samples are genuine paired draws
+    from the same NPE/MCMC posterior); params from different cache files
+    are forced to zero off-diagonal correlation, since they were inferred
+    independently and their per-row alignment in the cache files is an
+    artifact of RNG state, not a real dependency.
+
+    Args:
+        joint_samples_by_component: ``{component_id: {param: list[float]}}``
+            from :func:`load_joint_samples_by_component`. Each top-level
+            key is a single submodel inference run.
+        targets: {param_name: [target_ids]} from load_submodel_targets
+        groups: {param_name: group_id} from load_parameter_groups
+        output_path: Where to write submodel_priors.yaml
+        copula_threshold: Minimum |correlation| to include in copula
+    """
+    from qsp_inference.submodel.parameterizer import write_priors_yaml
+
+    # Center-scale marginals + copula (the flat-SBI prior). See _marginals_and_copula
+    # for the block-diagonal-by-component construction.
+    parameters, copula_block, n_samples = _marginals_and_copula(
+        joint_samples_by_component, targets, groups, copula_threshold
+    )
+    if not parameters:
+        print("No posterior samples to parameterize — skipping submodel_priors.yaml")
+        return
+
+    param_names = [p["name"] for p in parameters]
+
     metadata: dict = {
         "generated_by": "qsp_inference.audit.report",
         "n_parameters": len(param_names),
@@ -2047,6 +2047,23 @@ def _write_submodel_priors(
     }
     if copula_block:
         result["copula"] = copula_block
+
+    # Population-scale block (Option A): a parallel marginals + copula fit from the
+    # population pass (run_joint_inference(population_scale=True)), where params with a
+    # population observed_distribution are fit against the declared spread. This is the
+    # omega prior for hierarchical / virtual-patient inference; the center block above
+    # stays the SEM-scale flat-SBI prior. Only params that actually differ appear here;
+    # the hierarchical runner falls back to the center marginal / a wide default otherwise.
+    if population_samples_by_component is not None:
+        pop_parameters, pop_copula, pop_n = _marginals_and_copula(
+            population_samples_by_component, targets, groups, copula_threshold
+        )
+        if pop_parameters:
+            population_block: dict = {"n_samples": pop_n, "parameters": pop_parameters}
+            if pop_copula:
+                population_block["copula"] = pop_copula
+            result["population"] = population_block
+            metadata["has_population_block"] = True
 
     write_priors_yaml(result, output_path)
     print(f"Submodel priors written to {output_path}")
