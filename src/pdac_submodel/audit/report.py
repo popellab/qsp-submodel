@@ -1939,7 +1939,14 @@ def _marginals_and_copula(
     param_to_component: dict[str, str] = {}
     for comp_id, comp_samples in samples_by_component.items():
         for k, v in comp_samples.items():
-            if k not in targets or "__" in k:
+            # "__" strips the non-centered internals (__z, __base, __tau, __delta).
+            # Keep a param if a target names it directly OR it is a member of a
+            # hierarchical group: a group member with no target of its own is
+            # precisely the case partial pooling exists to serve — its posterior is
+            # the group mean shrunk by the ANCHORED members. Requiring `k in targets`
+            # dropped those members here, so they silently fell back to their bare
+            # CSV priors and the pooling was computed and then thrown away.
+            if "__" in k or (k not in targets and k not in groups):
                 continue
             output_samples[k] = np.asarray(v)
             param_to_component[k] = comp_id
