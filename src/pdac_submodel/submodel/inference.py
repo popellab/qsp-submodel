@@ -80,6 +80,14 @@ class ErrorModelEntry:
     fit: DistFit  # full fit result for diagnostics
     sigma_trans: float = 0.0  # per-entry translation sigma
     sigma_trans_breakdown: dict = field(default_factory=dict)
+    # Population pass (Option A) shared-unit grouping. Entries that share a
+    # ``unit_group`` are measured on the SAME biological units and share ONE
+    # population random effect, so K grouped observables do not shrink the
+    # population posterior by ~sqrt(K). Set only when ``sigma`` is a genuine
+    # across-unit spread (``is_population_spread``).
+    unit_group: Optional[str] = None
+    n_biological: Optional[int] = None
+    is_population_spread: bool = False
 
 
 @dataclass
@@ -960,10 +968,17 @@ def build_target_likelihoods(
             # Option A: on the population pass, replace the center-only bootstrap width
             # with the declared population spread from observed_distribution (center
             # unchanged). Entries without a population observed_distribution stay SEM-scale.
+            entry_unit_group = None
+            entry_n_biological = None
+            entry_is_population_spread = False
             if population_scale:
                 pop = _population_obs_from_distribution(entry, target)
                 if pop is not None:
                     value, sigma, family = pop
+                    entry_is_population_spread = True
+                    od = getattr(entry, "observed_distribution", None)
+                    entry_unit_group = getattr(od, "unit_group", None)
+                    entry_n_biological = getattr(od, "n_biological", None)
 
             # Per-measurement translation sigma from sources of its inputs
             entry_sigma_trans, entry_sigma_breakdown = resolve_per_measurement_sigma(
@@ -979,6 +994,9 @@ def build_target_likelihoods(
                     fit=dist_fit,
                     sigma_trans=entry_sigma_trans,
                     sigma_trans_breakdown=entry_sigma_breakdown,
+                    unit_group=entry_unit_group,
+                    n_biological=entry_n_biological,
+                    is_population_spread=entry_is_population_spread,
                 )
             )
 
@@ -1106,6 +1124,26 @@ def submodel_joint_model(prior_specs, target_likelihoods, parameter_groups=None)
                 # Final parameter value: k_i = k_base * exp(delta_i)
                 params[member.name] = numpyro.deterministic(member.name, k_base * jnp.exp(delta))
 
+    # Population-pass shared-unit grouping (maple #62 ``unit_group``): entries measured
+    # on the SAME biological units share ONE population random effect. Without this, K
+    # grouped observables each contribute an independent likelihood term and shrink the
+    # population posterior by ~sqrt(K) — the spurious over-confidence the guardrail exists
+    # to prevent. Sample one standardized latent per group with >= 2 members; singletons
+    # fall through to the ordinary independent likelihood (behaviour unchanged).
+    import re as _re
+    from collections import defaultdict as _defaultdict
+
+    _group_members = _defaultdict(list)
+    for tl in target_likelihoods:
+        for entry in tl.entries:
+            if getattr(entry, "is_population_spread", False) and entry.unit_group:
+                _group_members[entry.unit_group].append(entry)
+    shared_u = {}
+    for g, members in _group_members.items():
+        if len(members) >= 2:
+            site = "ugroup__" + _re.sub(r"[^0-9A-Za-z_]", "_", str(g))
+            shared_u[g] = numpyro.sample(site, dist.Normal(0.0, 1.0))
+
     # Likelihood: loop over targets, then error model entries
     for tl in target_likelihoods:
         for j, entry in enumerate(tl.entries):
@@ -1113,28 +1151,53 @@ def submodel_joint_model(prior_specs, target_likelihoods, parameter_groups=None)
 
             site_name = f"obs_{tl.target_id}_{j}" if len(tl.entries) > 1 else f"obs_{tl.target_id}"
 
+            # Shared-unit group member? Then the population spread rides a shared latent
+            # (u * sigma) and only the finite-sample noise on the observed median
+            # (sigma / sqrt(n_biological)) plus translation stays independent per
+            # observable — so adding more observables of the SAME panel does not shrink ω.
+            grouped = getattr(entry, "is_population_spread", False) and entry.unit_group in shared_u
+            n_bio = entry.n_biological or 1
+
             # Guard against NaN predictions from solver failures.
             # For lognormal likelihoods, also require predicted > 0.
             if entry.family == "lognormal":
                 valid = jnp.isfinite(predicted) & (predicted > 0)
                 safe_predicted = jnp.where(valid, predicted, 1.0)
                 numpyro.factor(f"valid_{site_name}", jnp.where(valid, 0.0, -jnp.inf))
-                sigma_total = jnp.sqrt(entry.sigma**2 + entry.sigma_trans**2)
-                numpyro.sample(
-                    site_name,
-                    dist.LogNormal(jnp.log(safe_predicted), sigma_total),
-                    obs=entry.value,
-                )
+                if grouped:
+                    sigma_indep = jnp.sqrt(entry.sigma_trans**2 + entry.sigma**2 / n_bio)
+                    mean_log = jnp.log(safe_predicted) + shared_u[entry.unit_group] * entry.sigma
+                    numpyro.sample(
+                        site_name,
+                        dist.LogNormal(mean_log, sigma_indep),
+                        obs=entry.value,
+                    )
+                else:
+                    sigma_total = jnp.sqrt(entry.sigma**2 + entry.sigma_trans**2)
+                    numpyro.sample(
+                        site_name,
+                        dist.LogNormal(jnp.log(safe_predicted), sigma_total),
+                        obs=entry.value,
+                    )
             else:  # normal — predicted can be any finite value
                 valid = jnp.isfinite(predicted)
                 safe_predicted = jnp.where(valid, predicted, 0.0)
                 numpyro.factor(f"valid_{site_name}", jnp.where(valid, 0.0, -jnp.inf))
-                sd_total = jnp.sqrt(entry.sigma**2 + (entry.value * entry.sigma_trans) ** 2)
-                numpyro.sample(
-                    site_name,
-                    dist.Normal(safe_predicted, sd_total),
-                    obs=entry.value,
-                )
+                if grouped:
+                    sd_indep = jnp.sqrt((entry.value * entry.sigma_trans) ** 2 + entry.sigma**2 / n_bio)
+                    mean = safe_predicted + shared_u[entry.unit_group] * entry.sigma
+                    numpyro.sample(
+                        site_name,
+                        dist.Normal(mean, sd_indep),
+                        obs=entry.value,
+                    )
+                else:
+                    sd_total = jnp.sqrt(entry.sigma**2 + (entry.value * entry.sigma_trans) ** 2)
+                    numpyro.sample(
+                        site_name,
+                        dist.Normal(safe_predicted, sd_total),
+                        obs=entry.value,
+                    )
 
 
 # =============================================================================
