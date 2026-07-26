@@ -332,12 +332,21 @@ def write_priors_yaml(result: dict, path: Path) -> None:
             [round(v, 4) for v in row] for row in result["copula"]["correlation"]
         ]
 
-    # Round marginal params
+    # Round marginal params to 6 SIGNIFICANT FIGURES, not 6 decimal places.
+    # Decimal rounding silently annihilates any marginal whose parameters live
+    # far below 1: a gamma fitted to a rate in nmol/cell/hour has scale ~1e-11,
+    # and round(1.47e-11, 6) is 0.0. A gamma with scale=0 is degenerate, so the
+    # log-domain fit in priors/copula_prior.py raises and the parameter silently
+    # falls back to its CSV lognormal -- losing the submodel anchor it was
+    # inferred to carry. Significant figures keep the same readability without
+    # being scale-dependent. (Lognormals were spared only by accident: their
+    # mu/sigma are log-space and O(1), so only their unused `median` field
+    # underflowed.)
     for param in result["parameters"]:
         m = param["marginal"]
         for key in m:
             if isinstance(m[key], float):
-                m[key] = round(m[key], 6)
+                m[key] = float(f"{m[key]:.6g}")
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
