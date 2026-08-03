@@ -1339,7 +1339,6 @@ def run_joint_inference(
     _cache_dir.mkdir(parents=True, exist_ok=True)
     jax.config.update("jax_compilation_cache_dir", str(_cache_dir))
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
-    jax.config.update("jax_enable_x64", False)
 
     import time as _time
 
@@ -1451,7 +1450,6 @@ def run_joint_inference_vi(
     _cache_dir.mkdir(parents=True, exist_ok=True)
     jax.config.update("jax_compilation_cache_dir", str(_cache_dir))
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
-    jax.config.update("jax_enable_x64", False)
 
     import time as _time
 
