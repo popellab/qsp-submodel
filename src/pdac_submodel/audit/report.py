@@ -115,6 +115,41 @@ def load_priors(path: Path) -> dict:
     return params
 
 
+def load_target_ids_by_filename(submodel_dir: Path) -> dict:
+    """Scan submodel target YAMLs → {filename: target_id}.
+
+    The cache records which YAMLs a component consumed, by filename, and the
+    cascade cuts name their upstream by target_id. The two do not match as
+    strings, so resolving a cut needs this map.
+    """
+    out = {}
+    for yaml_path in sorted(submodel_dir.glob("*_deriv*.yaml")):
+        try:
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            continue
+        if data:
+            out[yaml_path.name] = data.get("target_id", yaml_path.stem)
+    return out
+
+
+def component_target_ids(
+    freshness_by_component: dict, ids_by_filename: dict
+) -> dict:
+    """``{component_id: {target_id}}`` from the cache's own record.
+
+    Per component, not unioned over the params it carries: a merged component
+    holds targets belonging to its other parameters, so the union matches an
+    upstream target that the component never actually used.
+    """
+    out = {}
+    for comp_id, fresh in (freshness_by_component or {}).items():
+        yamls = ((fresh or {}).get("inputs") or {}).get("target_yamls") or {}
+        out[comp_id] = {ids_by_filename.get(f, f) for f in yamls}
+    return out
+
+
 def load_submodel_targets(submodel_dir: Path) -> dict:
     """Scan submodel target YAMLs → {param_name: [target_ids]}."""
     coverage = defaultdict(list)
@@ -132,6 +167,26 @@ def load_submodel_targets(submodel_dir: Path) -> dict:
             if not p.get("nuisance", False) and name:
                 coverage[name].append(target_id)
     return dict(coverage)
+
+
+def load_cascade_cuts(path: Path) -> dict:
+    """Load submodel_config.yaml → {param_name: [authoritative target_ids]}.
+
+    A cut parameter is deliberately left unvisited during the component BFS, so
+    it appears in several components. Only the upstream one is meant to reach
+    the priors; the others are the views the cut exists to discard.
+    """
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    cuts = {}
+    for cut in (data or {}).get("cascade_cuts", []) or []:
+        name = cut.get("parameter")
+        upstream = list(cut.get("upstream", []) or [])
+        if name and upstream:
+            cuts[name] = upstream
+    return cuts
 
 
 def load_parameter_groups(path: Path) -> dict:
@@ -1917,6 +1972,8 @@ def _marginals_and_copula(
     targets: dict[str, list[str]],
     groups: dict[str, str],
     copula_threshold: float,
+    cascade_cuts: dict[str, list[str]] | None = None,
+    comp_targets: dict[str, set] | None = None,
 ) -> tuple[list[dict], dict | None, int]:
     """Fit per-param marginals + a block-diagonal Gaussian copula from component samples.
 
@@ -1935,6 +1992,15 @@ def _marginals_and_copula(
         threshold_copula,
     )
 
+    cascade_cuts = cascade_cuts or {}
+    comp_targets = comp_targets or {}
+    if cascade_cuts and not comp_targets:
+        raise ValueError(
+            "cascade_cuts needs comp_targets to resolve against. Without the "
+            "per-component target list the cut cannot be told from the view it "
+            "exists to discard, and the filter would silently pass everything."
+        )
+
     output_samples: dict[str, np.ndarray] = {}
     param_to_component: dict[str, str] = {}
     for comp_id, comp_samples in samples_by_component.items():
@@ -1948,8 +2014,21 @@ def _marginals_and_copula(
             # CSV priors and the pooling was computed and then thrown away.
             if "__" in k or (k not in targets and k not in groups):
                 continue
+            # A cut parameter appears in several components by construction, so
+            # plain assignment kept whichever came last in dict order. That was
+            # the downstream view for 3 of the 7 cuts, including one the config
+            # cut for SBC bias. Only the declared upstream is taken now.
+            if k in cascade_cuts:
+                if not (comp_targets.get(comp_id, set()) & set(cascade_cuts[k])):
+                    continue
             output_samples[k] = np.asarray(v)
             param_to_component[k] = comp_id
+
+    unresolved = [k for k in cascade_cuts if k in
+                  {p for s in samples_by_component.values() for p in s}
+                  and k not in output_samples]
+    if unresolved:
+        print(f"WARNING: cascade cuts with no upstream component: {sorted(unresolved)}")
 
     if not output_samples:
         return [], None, 0
@@ -2022,6 +2101,8 @@ def _write_submodel_priors(
     copula_threshold: float = 0.05,
     freshness_by_component: dict[str, dict] | None = None,
     population_samples_by_component: dict[str, dict] | None = None,
+    cascade_cuts: dict[str, list[str]] | None = None,
+    comp_targets: dict[str, set] | None = None,
 ) -> None:
     """Write submodel_priors.yaml from cached joint posterior samples.
 
@@ -2050,7 +2131,8 @@ def _write_submodel_priors(
     # Center-scale marginals + copula (the flat-SBI prior). See _marginals_and_copula
     # for the block-diagonal-by-component construction.
     parameters, copula_block, n_samples = _marginals_and_copula(
-        joint_samples_by_component, targets, groups, copula_threshold
+        joint_samples_by_component, targets, groups, copula_threshold,
+        cascade_cuts, comp_targets
     )
     if not parameters:
         print("No posterior samples to parameterize — skipping submodel_priors.yaml")
@@ -2093,7 +2175,8 @@ def _write_submodel_priors(
     # the hierarchical runner falls back to the center marginal / a wide default otherwise.
     if population_samples_by_component is not None:
         pop_parameters, pop_copula, pop_n = _marginals_and_copula(
-            population_samples_by_component, targets, groups, copula_threshold
+            population_samples_by_component, targets, groups, copula_threshold,
+            cascade_cuts, comp_targets
         )
         if pop_parameters:
             population_block: dict = {"n_samples": pop_n, "parameters": pop_parameters}
@@ -2122,6 +2205,11 @@ def _run_inference(config: AuditConfig, invalidate_params=None, run_population_p
         priors_csv=str(config.priors_csv),
         submodel_dir=str(config.submodel_dir),
         num_samples=4000,
+        # Decided here, where the config lives, rather than discovered inside
+        # run_comparison: absence has to be a statement someone made.
+        parameter_groups_path=(
+            config.param_groups if config.param_groups.exists() else None
+        ),
         invalidate_params=invalidate_params,
         run_population_pass=run_population_pass,
     )
@@ -2203,6 +2291,11 @@ def run_audit(config: AuditConfig, output: Path | None = None, invalidate_params
                 priors_yaml_path,
                 freshness_by_component=freshness_by_component,
                 population_samples_by_component=population_samples_by_component,
+                cascade_cuts=load_cascade_cuts(config.param_groups),
+                comp_targets=component_target_ids(
+                    freshness_by_component,
+                    load_target_ids_by_filename(config.submodel_dir),
+                ),
             )
 
     return report
