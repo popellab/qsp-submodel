@@ -1195,8 +1195,15 @@ def run_comparison(
                                 for pn in comp_samples
                                 if i < len(comp_samples[pn])
                             }
+                            # Nuisance parameters are sampled by MCMC, so the
+                            # posterior draw already in pd is the one to predict
+                            # from. Re-drawing from the prior here would make
+                            # this a prior predictive for any observable that
+                            # depends only on nuisance parameters. Fall back to
+                            # the prior only when a component did not sample it.
                             for nn, ip in nuisance.items():
-                                pd[nn] = _sample_from_prior(rng, ip)
+                                if nn not in pd:
+                                    pd[nn] = _sample_from_prior(rng, ip)
                             try:
                                 preds.append(float(fn(pd)))
                             except Exception:
