@@ -35,6 +35,109 @@ from qsp_inference.submodel.prior import DistFit, fit_distributions
 # =============================================================================
 
 
+#: Interior grid points per parameter. Sets the marginal's KS resolution at
+#: 1/(N+1), so 199 puts it at 0.005 against a 5% critical value near 0.015.
+N_LOG_GRID = 199
+
+
+def empirical_log_grid(samples: np.ndarray, n_grid: int = N_LOG_GRID) -> dict:
+    """A parameter's posterior as quantiles of ``log theta``, against normal scores.
+
+    Returned as ``{"distribution": "empirical_log", "z": [...], "q": [...]}``,
+    where ``q[i]`` is the ``Phi(z[i])`` quantile of the log samples.
+
+    Indexed by normal score rather than by probability so that extrapolating
+    linearly past the end of the grid is exactly a Gaussian tail. A grid in ``p``
+    would have to invent one, and a marginal with no tail returns ``-inf`` for
+    any draw outside the sampled range.
+
+    A parametric fit is not used because on this corpus it fails Anderson-Darling
+    for 61% of parameters and no candidate family passes for 113 of them.
+    """
+    s = np.asarray(samples, dtype=float)
+    pos = s[s > 0]
+    if len(pos) < 100:
+        raise ValueError(
+            f"need at least 100 positive samples to build a grid, got {len(pos)}"
+        )
+    logs = np.log(pos)
+
+    p = np.arange(1, n_grid + 1) / (n_grid + 1)
+    q = np.quantile(logs, p)
+    # Strictly increasing, or the interpolant is not invertible. Ties happen
+    # where a chain parked on a bound.
+    q = np.maximum.accumulate(q)
+    bump = np.arange(n_grid) * np.spacing(max(abs(q[0]), abs(q[-1]), 1.0))
+    q = q + bump
+
+    return {
+        "distribution": "empirical_log",
+        "z": [float(x) for x in stats.norm.ppf(p)],
+        "q": [float(x) for x in q],
+    }
+
+
+def split_grids_to_sidecar(parameters: list[dict], yaml_path: Path) -> Optional[dict]:
+    """Move the quantile grids out of ``parameters`` into a ``.npz`` beside the YAML.
+
+    Mutates ``parameters`` so each grid marginal carries ``grid`` and ``index``
+    instead of its ``z``/``q`` arrays. Returns the sidecar's manifest entry, or
+    ``None`` when no parameter carries a grid.
+
+    Inline, the grids make the file 12x larger and 5x slower to parse, and every
+    parameter repeats the same ``z``. They are also not what anyone opens the
+    YAML to read.
+    """
+    idx = [i for i, p in enumerate(parameters)
+           if p.get("marginal", {}).get("distribution") == "empirical_log"]
+    if not idx:
+        return None
+
+    z0 = parameters[idx[0]]["marginal"]["z"]
+    for i in idx:
+        if parameters[i]["marginal"]["z"] != z0:
+            raise ValueError(
+                f"{parameters[i]['name']} carries a different z grid. The sidecar "
+                "stores z once, so every grid has to share it."
+            )
+
+    q = np.array([parameters[i]["marginal"]["q"] for i in idx], dtype=float)
+    names = [parameters[i]["name"] for i in idx]
+
+    yaml_path = Path(yaml_path)
+    npz_path = yaml_path.with_suffix(".npz")
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    # Uncompressed on purpose. Quantile grids of float64 barely compress (268 KB
+    # against 281 KB), and this file is version-controlled: a pre-compressed blob
+    # is opaque to git's delta, so every regeneration would store the whole thing
+    # again. 13 KB buys successive versions that can delta against each other.
+    np.savez(npz_path, z=np.asarray(z0, dtype=float), q=q,
+             names=np.array(names, dtype=object), allow_pickle=True)
+
+    for slot, i in enumerate(idx):
+        m = parameters[i]["marginal"]
+        del m["z"], m["q"]
+        m["grid"] = npz_path.name
+        m["index"] = slot
+
+    return {
+        "file": npz_path.name,
+        "sha256": _sha256_file(npz_path),
+        "n_parameters": len(idx),
+        "n_grid": int(q.shape[1]),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def fit_marginals(samples: dict[str, np.ndarray]) -> dict[str, DistFit]:
     """Fit marginal distributions to each parameter's posterior samples.
 
@@ -77,6 +180,23 @@ def _build_marginal_cdf(fit: DistFit):
         return lambda x: stats.norm.cdf(x, loc=mu, scale=sigma)
     else:
         raise ValueError(f"Unknown distribution: {fit.name}")
+
+
+def rank_gaussian_copula(samples_matrix: np.ndarray) -> np.ndarray:
+    """Gaussian copula correlation from rank pseudo-observations.
+
+    ``u = rank / (n + 1)`` rather than ``F_hat(x)``, so the dependence estimate
+    does not depend on how well the marginals were fitted. Going through fitted
+    CDFs leaves ``u`` non-uniform wherever a marginal is off, and the correlation
+    then absorbs that error as if it were dependence.
+    """
+    x = np.asarray(samples_matrix, dtype=float)
+    n = x.shape[0]
+    u = np.empty_like(x)
+    for j in range(x.shape[1]):
+        u[:, j] = stats.rankdata(x[:, j], method="average") / (n + 1)
+    z = stats.norm.ppf(u)
+    return np.corrcoef(z, rowvar=False)
 
 
 def fit_gaussian_copula(

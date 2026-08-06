@@ -1986,9 +1986,8 @@ def _marginals_and_copula(
     import numpy as np
 
     from qsp_inference.submodel.parameterizer import (
-        _build_marginal_cdf,
-        fit_gaussian_copula,
-        fit_marginals,
+        empirical_log_grid,
+        rank_gaussian_copula,
         threshold_copula,
     )
 
@@ -2034,7 +2033,7 @@ def _marginals_and_copula(
         return [], None, 0
 
     param_names = sorted(output_samples.keys())
-    marginals = fit_marginals(output_samples)
+    grids = {n: empirical_log_grid(output_samples[n]) for n in param_names}
 
     if len(param_names) > 1:
         from collections import defaultdict
@@ -2049,9 +2048,11 @@ def _marginals_and_copula(
         for group_names in component_groups.values():
             if len(group_names) < 2:
                 continue
+            # Ranks, not the fitted CDFs. A marginal that fits poorly makes
+            # F(x) non-uniform, and the correlation then absorbs the marginal's
+            # error as if it were dependence.
             block_matrix = np.column_stack([output_samples[n] for n in group_names])
-            block_cdfs = [_build_marginal_cdf(marginals[n]) for n in group_names]
-            R_block = fit_gaussian_copula(block_matrix, block_cdfs)
+            R_block = rank_gaussian_copula(block_matrix)
             for bi, ni in enumerate(group_names):
                 for bj, nj in enumerate(group_names):
                     R[name_to_idx[ni], name_to_idx[nj]] = R_block[bi, bj]
@@ -2063,14 +2064,16 @@ def _marginals_and_copula(
 
     parameters = []
     for name in param_names:
-        fit = marginals[name]
+        s_pos = np.asarray(output_samples[name], dtype=float)
+        s_pos = s_pos[s_pos > 0]
+        # Summaries from the samples, not from a fitted family, so a reader that
+        # wants one number gets the posterior's own.
         entry = {
             "name": name,
             "marginal": {
-                "distribution": fit.name,
-                **fit.params,
-                "median": float(fit.median),
-                "cv": float(fit.cv),
+                **grids[name],
+                "median": float(np.median(s_pos)),
+                "cv": float(np.std(s_pos, ddof=1) / np.mean(s_pos)),
             },
         }
         if name in targets:
@@ -2104,10 +2107,11 @@ def _write_submodel_priors(
     cascade_cuts: dict[str, list[str]] | None = None,
     comp_targets: dict[str, set] | None = None,
 ) -> None:
-    """Write submodel_priors.yaml from cached joint posterior samples.
+    """Write submodel_priors.yaml, plus the .npz sidecar holding its grids.
 
-    Uses fit_marginals and fit_gaussian_copula from the parameterizer module
-    but avoids loading SubmodelTarget Pydantic objects.
+    Marginals are the posterior's own shape as a quantile grid on ``log theta``.
+    The grids live in ``<output_path stem>.npz`` and the YAML keeps the part a
+    person reads, with a sha256 of the sidecar so drift is detectable.
 
     The copula block is constructed **block-diagonally per inference
     component**: params produced by the same ``comp_*.json`` cache file
@@ -2126,7 +2130,10 @@ def _write_submodel_priors(
         output_path: Where to write submodel_priors.yaml
         copula_threshold: Minimum |correlation| to include in copula
     """
-    from qsp_inference.submodel.parameterizer import write_priors_yaml
+    from qsp_inference.submodel.parameterizer import (
+        split_grids_to_sidecar,
+        write_priors_yaml,
+    )
 
     # Center-scale marginals + copula (the flat-SBI prior). See _marginals_and_copula
     # for the block-diagonal-by-component construction.
@@ -2160,6 +2167,10 @@ def _write_submodel_priors(
             cid: freshness_by_component[cid]
             for cid in sorted(freshness_by_component)
         }
+    sidecar = split_grids_to_sidecar(parameters, output_path)
+    if sidecar:
+        metadata["grid_sidecar"] = sidecar
+
     result = {
         "metadata": metadata,
         "parameters": parameters,
