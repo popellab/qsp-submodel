@@ -640,7 +640,10 @@ def run_comparison(
         submodel_dir: Directory containing SubmodelTarget YAMLs.
         glob_pattern: Glob for YAML files.
         num_samples: Number of posterior samples per component.
-        parameter_groups_path: Optional path to submodel_config.yaml.
+        parameter_groups_path: Path to submodel_config.yaml, or None to declare
+            there are no groups and no cascade cuts. Not discovered from
+            ``submodel_dir``: it sets the component partition, so a guessed path
+            re-partitions the run silently.
         invalidate_params: Optional list of parameter names. Any cached
             component containing at least one of these parameters will be
             deleted and re-run.
@@ -682,14 +685,13 @@ def run_comparison(
     priors_csv = Path(priors_csv)
     submodel_dir = Path(submodel_dir)
 
-    # Load parameter groups if provided (or auto-discover in submodel_dir)
+    # Passed, never discovered. This config decides the component partition
+    # through cascade_cut_params, so a path this function guessed for itself
+    # could differ from the caller's and re-partition the whole run with no
+    # error and no symptom. ``None`` means the caller declares there are none.
     param_groups = None
     if parameter_groups_path is not None:
         param_groups = load_parameter_groups(Path(parameter_groups_path))
-    else:
-        auto_path = submodel_dir / "submodel_config.yaml"
-        if auto_path.exists():
-            param_groups = load_parameter_groups(auto_path)
     if param_groups and param_groups.groups:
         logger.info(
             "Loaded %d parameter groups (%d params)",
@@ -1193,8 +1195,15 @@ def run_comparison(
                                 for pn in comp_samples
                                 if i < len(comp_samples[pn])
                             }
+                            # Nuisance parameters are sampled by MCMC, so the
+                            # posterior draw already in pd is the one to predict
+                            # from. Re-drawing from the prior here would make
+                            # this a prior predictive for any observable that
+                            # depends only on nuisance parameters. Fall back to
+                            # the prior only when a component did not sample it.
                             for nn, ip in nuisance.items():
-                                pd[nn] = _sample_from_prior(rng, ip)
+                                if nn not in pd:
+                                    pd[nn] = _sample_from_prior(rng, ip)
                             try:
                                 preds.append(float(fn(pd)))
                             except Exception:
