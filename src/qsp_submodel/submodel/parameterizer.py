@@ -10,7 +10,7 @@ Output is written to submodel_priors.yaml for consumption by qsp-sbi.
 
 Usage::
 
-    from pdac_submodel.submodel.parameterizer import parameterize_posteriors, write_priors_yaml
+    from qsp_submodel.submodel.parameterizer import parameterize_posteriors, write_priors_yaml
 
     result = parameterize_posteriors(samples, targets)
     write_priors_yaml(result, Path("submodel_priors.yaml"))
@@ -25,9 +25,9 @@ from typing import Optional
 import numpy as np
 from scipy import stats
 
-from pdac_submodel.submodel.parameter_groups import ParameterGroupsConfig
+from qsp_submodel.submodel.parameter_groups import ParameterGroupsConfig
 from maple.core.calibration.submodel_target import SubmodelTarget
-from pdac_submodel.submodel.prior import DistFit, fit_distributions
+from qsp_submodel.submodel.prior import DistFit, fit_distributions
 
 
 # =============================================================================
@@ -367,7 +367,7 @@ def parameterize_posteriors(
 
     n_samples = len(next(iter(output_samples.values()))) if output_samples else 0
     metadata = {
-        "generated_by": "pdac_submodel.submodel.parameterizer",
+        "generated_by": "qsp_submodel.submodel.parameterizer",
         "n_targets": len(targets),
         "n_parameters": len(param_names),
         "n_samples": n_samples,

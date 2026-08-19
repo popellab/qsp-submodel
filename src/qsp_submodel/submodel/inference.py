@@ -10,7 +10,7 @@ Shared parameters (same name across targets) are sampled once and reused.
 
 Usage::
 
-    from pdac_submodel.submodel.inference import run_joint_inference, load_priors_from_csv
+    from qsp_submodel.submodel.inference import run_joint_inference, load_priors_from_csv
 
     prior_specs = load_priors_from_csv("pdac_priors.csv")
     targets = [SubmodelTarget(**yaml.safe_load(p.read_text())) for p in yaml_paths]
@@ -28,13 +28,13 @@ from typing import Optional
 
 import numpy as np
 
-from pdac_submodel.submodel.parameter_groups import ParameterGroupsConfig
+from qsp_submodel.submodel.parameter_groups import ParameterGroupsConfig
 from maple.core.calibration.submodel_target import SubmodelTarget
-from pdac_submodel.submodel.utils import (
+from qsp_submodel.submodel.utils import (
     STRUCTURED_ALGEBRAIC_TYPES,
     _evaluate_structured_model,
 )
-from pdac_submodel.submodel.prior import (
+from qsp_submodel.submodel.prior import (
     DistFit,
     compute_translation_sigma,
     fit_distributions,
@@ -388,7 +388,7 @@ def _resolve_role(role, param_values, inputs_dict, reference_db):
     For InputRef/ReferenceRef/numeric literals, returns a plain float.
     Reuses the logic from submodel_utils._resolve_parameter_role.
     """
-    from pdac_submodel.submodel.utils import _resolve_parameter_role
+    from qsp_submodel.submodel.utils import _resolve_parameter_role
 
     return _resolve_parameter_role(role, param_values, inputs_dict, reference_db)
 
@@ -1407,126 +1407,6 @@ def run_joint_inference(
     return samples_np, diagnostics
 
 
-def run_joint_inference_vi(
-    prior_specs: dict[str, PriorSpec],
-    targets: list[SubmodelTarget],
-    reference_db: Optional[dict[str, float]] = None,
-    parameter_groups: Optional[ParameterGroupsConfig] = None,
-    num_samples: int = 4000,
-    seed: int = 0,
-) -> tuple[dict[str, np.ndarray], dict]:
-    """Run joint Laplace approximation across all SubmodelTargets.
-
-    Finds the MAP estimate, computes the Hessian to get a Gaussian
-    approximation, then draws samples. Much faster than NUTS or SVI
-    because it requires only one optimization pass (no iterative
-    gradient steps through the guide).
-
-    Args:
-        prior_specs: Prior specifications from CSV
-        targets: List of SubmodelTarget objects
-        reference_db: Optional reference values
-        parameter_groups: Optional hierarchical parameter groups
-        num_samples: Number of posterior samples to draw from Laplace approx
-        seed: Random seed
-
-    Returns:
-        Same interface as run_joint_inference: (samples_dict, diagnostics_dict)
-    """
-    try:
-        import jax
-        import jax.random
-        import numpyro
-        from numpyro.infer import SVI, Trace_ELBO
-        from numpyro.infer.autoguide import AutoLaplaceApproximation
-        from numpyro.optim import Adam
-    except ImportError as e:
-        raise ImportError(
-            "JAX and NumPyro are required for inference. "
-            "Install with: pip install maple[inference]"
-        ) from e
-
-    _cache_dir = Path.home() / ".cache" / "maple" / "jax_compilation_cache"
-    _cache_dir.mkdir(parents=True, exist_ok=True)
-    jax.config.update("jax_compilation_cache_dir", str(_cache_dir))
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
-
-    import time as _time
-
-    t0 = _time.perf_counter()
-    target_likelihoods = build_target_likelihoods(targets, prior_specs, reference_db)
-    t_build = _time.perf_counter() - t0
-
-    n_likelihood_terms = sum(len(tl.entries) for tl in target_likelihoods)
-    n_groups = len(parameter_groups.groups) if parameter_groups else 0
-    n_grouped = len(parameter_groups.all_grouped_params) if parameter_groups else 0
-    print(
-        f"Built joint model in {t_build:.1f}s: {len(prior_specs)} parameters "
-        f"({n_grouped} in {n_groups} hierarchical groups), "
-        f"{len(targets)} targets, {n_likelihood_terms} likelihood terms"
-    )
-
-    # Build model function with args bound
-    def model():
-        submodel_joint_model(
-            prior_specs=prior_specs,
-            target_likelihoods=target_likelihoods,
-            parameter_groups=parameter_groups,
-        )
-
-    guide = AutoLaplaceApproximation(model)
-    svi = SVI(model, guide, Adam(0.01), loss=Trace_ELBO())
-
-    print("Initializing Laplace (JAX compilation)...", flush=True)
-    rng_key = jax.random.PRNGKey(seed)
-    t0 = _time.perf_counter()
-    svi_state = svi.init(rng_key)
-    t_init = _time.perf_counter() - t0
-    print(f"Compilation: {t_init:.1f}s", flush=True)
-
-    # Optimize to find MAP
-    n_steps = 2000
-    try:
-        from tqdm import trange
-
-        pbar = trange(n_steps, desc="MAP", unit="step")
-    except ImportError:
-        pbar = range(n_steps)
-
-    t0 = _time.perf_counter()
-    losses = []
-    for step in pbar:
-        svi_state, loss = svi.update(svi_state)
-        losses.append(float(loss))
-        if hasattr(pbar, "set_postfix") and (step + 1) % 50 == 0:
-            pbar.set_postfix(loss=f"{np.mean(losses[-50:]):.1f}")
-
-    t_opt = _time.perf_counter() - t0
-    params = svi.get_params(svi_state)
-    final_loss = np.mean(losses[-50:])
-    print(f"MAP done in {t_opt:.1f}s. Final loss: {final_loss:.1f}")
-
-    # Draw samples from the Laplace approximation (MAP + Hessian)
-    print(f"Drawing {num_samples} samples from Laplace approximation...", flush=True)
-    rng_key = jax.random.PRNGKey(seed + 1)
-    t0 = _time.perf_counter()
-    predictive = numpyro.infer.Predictive(
-        model, guide=guide, params=params, num_samples=num_samples
-    )
-    all_samples = predictive(rng_key)
-    t_sample = _time.perf_counter() - t0
-    print(f"Sampling: {t_sample:.1f}s")
-
-    samples_np = {name: np.asarray(vals) for name, vals in all_samples.items()}
-
-    diagnostics = {
-        "num_divergences": 0,
-        "method": "laplace",
-        "final_loss": float(final_loss),
-        "per_param": _compute_contraction_z(samples_np, prior_specs),
-    }
-
-    return samples_np, diagnostics
 
 
 def run_component_npe(

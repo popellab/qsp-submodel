@@ -7,14 +7,14 @@ original CSV priors.
 
 Can be run standalone::
 
-    python -m pdac_submodel.submodel.comparison \\
+    python -m qsp_submodel.submodel.comparison \\
         --priors-csv parameters/pdac_priors.csv \\
         --submodel-dir calibration_targets/submodel_targets/ \\
         --output results/inference_comparison/report.md
 
 Or called programmatically::
 
-    from pdac_submodel.submodel.comparison import run_comparison
+    from qsp_submodel.submodel.comparison import run_comparison
     report = run_comparison(priors_csv, submodel_dir)
 """
 
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pdac_submodel.submodel.freshness import (
+from qsp_submodel.submodel.freshness import (
     compute_component_freshness as _compute_component_freshness,
 )
 
@@ -519,8 +519,8 @@ def _posterior_to_prior_spec(
     Returns:
         PriorSpec with lognormal distribution fitted to the posterior.
     """
-    from pdac_submodel.submodel.inference import PriorSpec
-    from pdac_submodel.submodel.prior import fit_distributions
+    from qsp_submodel.submodel.inference import PriorSpec
+    from qsp_submodel.submodel.prior import fit_distributions
 
     fits = fit_distributions(samples)
     if not fits:
@@ -672,15 +672,15 @@ def run_comparison(
     """
     import yaml
 
-    from pdac_submodel.submodel.inference import (
+    from qsp_submodel.submodel.inference import (
         load_priors_from_csv,
     )
     from maple.core.calibration.submodel_target import SubmodelTarget
-    from pdac_submodel.submodel.prior import (
+    from qsp_submodel.submodel.prior import (
         fit_distributions,
     )
 
-    from pdac_submodel.submodel.parameter_groups import load_parameter_groups
+    from qsp_submodel.submodel.parameter_groups import load_parameter_groups
 
     priors_csv = Path(priors_csv)
     submodel_dir = Path(submodel_dir)
@@ -981,7 +981,7 @@ def run_comparison(
             # Find relevant parameter groups for this component
             comp_groups = None
             if param_groups:
-                from pdac_submodel.submodel.parameter_groups import (
+                from qsp_submodel.submodel.parameter_groups import (
                     ParameterGroupsConfig,
                 )
 
@@ -1021,7 +1021,7 @@ def run_comparison(
             try:
                 if use_npe:
                     # NPE for ODE components (gives SBC diagnostics)
-                    from pdac_submodel.submodel.inference import (
+                    from qsp_submodel.submodel.inference import (
                         run_component_npe,
                     )
 
@@ -1035,7 +1035,7 @@ def run_comparison(
                     )
                 else:
                     # Multi-target, no ODE: NUTS is fast and exact
-                    from pdac_submodel.submodel.inference import (
+                    from qsp_submodel.submodel.inference import (
                         run_joint_inference,
                     )
 
@@ -1067,7 +1067,7 @@ def run_comparison(
                         ci + 1,
                     )
                 else:
-                    from pdac_submodel.submodel.inference import (
+                    from qsp_submodel.submodel.inference import (
                         run_joint_inference,
                     )
 
@@ -1123,7 +1123,7 @@ def run_comparison(
 
             # Run PPC for non-NPE components (NPE does its own PPC internally)
             if not has_ode and "ppc_coverage" not in comp_diag:
-                from pdac_submodel.submodel.inference import (
+                from qsp_submodel.submodel.inference import (
                     build_numpy_forward_fns,
                     build_target_likelihoods,
                 )

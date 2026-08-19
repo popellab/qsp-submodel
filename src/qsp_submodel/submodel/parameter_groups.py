@@ -16,7 +16,7 @@ Optional delta priors encode biological ordering without hard constraints.
 
 Usage::
 
-    from pdac_submodel.submodel.parameter_groups import load_parameter_groups
+    from qsp_submodel.submodel.parameter_groups import load_parameter_groups
 
     groups = load_parameter_groups(Path("submodel_config.yaml"))
 """
