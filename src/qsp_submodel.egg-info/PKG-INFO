@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: qsp-submodel
+Version: 0.1.0
+Summary: Submodel MCMC/NPE calibration for QSP models
+Author-email: Joel Eliason <jeliaso2@jh.edu>
+License: MIT
+Requires-Python: >=3.11
+Requires-Dist: maple-qsp>=0.8.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: scipy>=1.11.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: ruamel.yaml>=0.17
+Requires-Dist: pydantic>=2.0
+Provides-Extra: fit
+Requires-Dist: numpyro>=0.15; extra == "fit"
+Requires-Dist: jax>=0.4; extra == "fit"
+Requires-Dist: jaxlib>=0.4; extra == "fit"
+Requires-Dist: diffrax>=0.6; extra == "fit"
+Provides-Extra: npe
+Requires-Dist: torch>=1.9; extra == "npe"
+Requires-Dist: sbi>=0.19; extra == "npe"
+Provides-Extra: plots
+Requires-Dist: matplotlib>=3.4; extra == "plots"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"

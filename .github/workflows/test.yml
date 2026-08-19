@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ends of the supported range rather than one point in it:
+        # requires-python is >=3.11, the sibling repos build on 3.11, and
+        # development happens on 3.13.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      # `npe` is installed even though no test calls run_component_npe end to
+      # end -- only torch's seeding block is exercised directly. It is here so
+      # CI resolves that function's `import sbi` at all: comparison.py selects
+      # run_component_npe for any component with a custom_ode forward model, so
+      # an unimportable NPE path is a broken default inference route that the
+      # suite would otherwise never touch.
+      - name: Install
+        run: uv venv && uv pip install -e ".[dev,fit,npe]"
+
+      - name: Test
+        run: uv run pytest -v
