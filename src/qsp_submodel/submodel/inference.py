@@ -1445,7 +1445,7 @@ def run_component_npe(
     # randomness are component-deterministic. Without this, every component
     # ends up with an identical torch RNG trajectory, which row-aligns the
     # posterior samples written to comp_*.json and makes downstream copula
-    # construction (audit.report._write_submodel_priors) infer comonotonic
+    # construction (submodel.aggregate._write_submodel_priors) infer comonotonic
     # coupling between params from independent components.
     import random as _random
 

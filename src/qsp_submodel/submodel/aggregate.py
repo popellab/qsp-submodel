@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""Parameter coverage audit for QSP models.
+"""Per-component posteriors, aggregated into ``submodel_priors.yaml``.
 
-Auto-detects available data and reports:
-- Stage 0: Prior coverage, submodel target coverage, PRCC-weighted priority
-- Stage 1: Submodel posterior contraction (when inference results exist)
-- Stage 2: NPE posterior shifts vs submodel posteriors (when SBI results exist)
-- Clinical predictive uncertainty: CI95 widths for PPC clinical endpoints
-  (OS/DFS landmarks, RECIST, tumor size, TTP) and Spearman attribution of
-  remaining spread back to parameters — surfaces the extraction priorities
-  that would shrink predictive uncertainty. Emits only when the promoted
-  stage-2 run has ``posterior_predictive_clinical.csv`` alongside its
-  posterior samples.
+The one live path out of this package: :func:`_run_inference` fits the
+components that are stale, and :func:`_write_submodel_priors` turns the joint
+posterior cache into the marginals-and-copula file the campaign reads as a
+``ROOT_INPUTS`` entry.
 
-Usage:
-    python -m qsp_submodel.audit.report --project-root /path/to/project
-    python -m qsp_submodel.audit.report --project-root . --output report.md
+Was ``audit/report.py``, which also built a Markdown parameter-coverage report
+over Stage-0 priors, Stage-1 contraction and Stage-2 NPE shifts. That report was
+last written 2026-06-30 against priors regenerated 2026-08-09, and the caller
+here always skipped it, so it was cut on 2026-08-19 along with the ``audit``
+package it gave its name to. What is left is the closure of the entry point that
+is still used, plus the loaders other callers reach for directly.
 """
-
 import csv
 import warnings
 
@@ -33,10 +29,12 @@ import yaml
 
 
 @dataclass
-class AuditConfig:
-    """Paths configuration for the parameter audit report.
+class SubmodelConfig:
+    """Where this package finds a project's submodel inputs on disk.
 
-    All paths are resolved relative to project_root if not absolute.
+    All paths are resolved relative to project_root if not absolute. The
+    defaults follow pdac-build's layout, which is the only project-specific
+    thing left in this package -- override them and the rest is generic.
     """
 
     project_root: Path
@@ -175,8 +173,8 @@ def load_compare_results(cache_dir: Path, priors: dict | None = None) -> dict:
 
     if not cache_dir.exists():
         raise FileNotFoundError(
-            f"{cache_dir} not found. Run inference first:\n"
-            f"  python scripts/parameter_audit.py"
+            f"{cache_dir} not found. Run inference first, which for\n"
+            f"pdac-paper is scripts/regen_submodel_priors.py."
         )
 
     parameters = {}
@@ -319,7 +317,7 @@ def load_joint_samples_by_component(cache_dir: Path) -> dict[str, dict] | None:
     or ``"joint_<id>"`` for legacy joint caches. Each top-level entry
     corresponds to one independent submodel inference run, so params from
     different entries are statistically independent given the prior — the
-    audit's composite copula must therefore be block-diagonal across
+    composite copula must therefore be block-diagonal across
     components.
 
     The previous flat :func:`load_joint_samples` collapsed this structure,
@@ -366,12 +364,12 @@ def load_population_samples_by_component(cache_dir: Path) -> dict[str, dict] | N
     ``population_samples`` block written by ``run_comparison(
     run_population_pass=True)`` — the Option-A second-pass posteriors that
     condition on genuine across-unit spread rather than the SEM-scale
-    center. These feed the audit's parallel population (ω) copula block.
+    center. These feed the parallel population (ω) copula block.
 
     Only components produced with the population pass carry this block, so a
     ``comp_*.json`` without ``population_samples`` is skipped. Returns
     ``None`` if no component carries population samples (i.e. the population
-    pass was never run) — the audit then emits only the center block.
+    pass was never run) — only the center block is then emitted.
     """
     if not cache_dir.exists():
         return None
@@ -440,8 +438,8 @@ def export_posterior_medians(cache_dir: Path) -> dict:
     all_samples = load_joint_samples(cache_dir)
     if not all_samples:
         raise FileNotFoundError(
-            f"No posterior samples found in {cache_dir}. "
-            "Run parameter audit first: python scripts/parameter_audit.py"
+            f"No posterior samples found in {cache_dir}. Run inference "
+            "first, which for pdac-paper is scripts/regen_submodel_priors.py."
         )
 
     # Filter nuisance params
@@ -731,7 +729,7 @@ def _write_submodel_priors(
     param_names = [p["name"] for p in parameters]
 
     metadata: dict = {
-        "generated_by": "qsp_submodel.audit.report",
+        "generated_by": "qsp_submodel.submodel.aggregate",
         "n_parameters": len(param_names),
         "n_samples": n_samples,
     }
@@ -788,7 +786,7 @@ def _write_submodel_priors(
 # ---------------------------------------------------------------------------
 
 
-def _run_inference(config: AuditConfig, invalidate_params=None, run_population_pass=False):
+def _run_inference(config: SubmodelConfig, invalidate_params=None, run_population_pass=False):
     """Run component-wise inference to generate/update cached results."""
     from qsp_submodel.submodel.comparison import run_comparison
 

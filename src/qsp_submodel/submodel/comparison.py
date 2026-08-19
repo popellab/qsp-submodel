@@ -662,7 +662,7 @@ def run_comparison(
             genuine across-unit spread (via ``build_target_likelihoods(
             population_scale=True)``) rather than the SEM-scale center, and
             its samples are stashed under ``population_samples`` in each
-            ``comp_*.json`` for the audit's parallel ω-copula block. This is
+            ``comp_*.json`` for the parallel ω-copula block. This is
             a *second* MCMC per pop-spread component, so it is opt-in on
             compute cost, not correctness. Components with no population
             spread simply copy their center-scale samples forward.
@@ -1015,7 +1015,7 @@ def run_comparison(
             # component gets an independent RNG trajectory. Without this,
             # all components would share torch's RNG state and produce
             # row-aligned posterior samples — which corrupts downstream
-            # copula construction in audit.report._write_submodel_priors.
+            # copula construction in submodel.aggregate._write_submodel_priors.
             comp_seed = (int(base_seed) + int(cci["comp_id"], 16)) & 0x7FFFFFFF
 
             try:
