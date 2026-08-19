@@ -34,12 +34,12 @@ These add in quadrature: sigma_total = max(sqrt(sigma_data^2 + sum(sigma_i^2)), 
 
 Usage (as library)::
 
-    from qsp_inference.submodel.prior import process_yaml
+    from pdac_submodel.submodel.prior import process_yaml
     results = process_yaml(Path("target.yaml"))  # list of dicts, one per parameter
 
 Usage (CLI)::
 
-    python -m qsp_inference.submodel.prior target.yaml
+    python -m pdac_submodel.submodel.prior target.yaml
 """
 
 from dataclasses import dataclass
@@ -49,7 +49,7 @@ from typing import Optional
 import numpy as np
 from scipy import stats
 
-from qsp_inference.submodel.parameter_groups import load_parameter_groups
+from pdac_submodel.submodel.parameter_groups import load_parameter_groups
 from maple.core.calibration.submodel_target import SubmodelTarget
 
 
@@ -340,7 +340,7 @@ def process_yaml(yaml_path: Path, priors_csv: Path) -> list[dict]:
 
     import yaml
 
-    from qsp_inference.submodel.inference import (
+    from pdac_submodel.submodel.inference import (
         load_priors_from_csv,
         run_joint_inference,
     )
@@ -383,7 +383,7 @@ def process_yaml(yaml_path: Path, priors_csv: Path) -> list[dict]:
         return [{"name": first_name, "error": f"MCMC inference failed: {e}"}]
 
     # Translation sigma: collect per-entry, report the max for diagnostics
-    from qsp_inference.submodel.inference import resolve_per_measurement_sigma
+    from pdac_submodel.submodel.inference import resolve_per_measurement_sigma
 
     entry_sigmas = []
     for entry in target.calibration.error_model:
@@ -651,11 +651,11 @@ def process_targets(
 
     import yaml as pyyaml
 
-    from qsp_inference.submodel.parameterizer import (
+    from pdac_submodel.submodel.parameterizer import (
         parameterize_posteriors,
         write_priors_yaml,
     )
-    from qsp_inference.submodel.inference import (
+    from pdac_submodel.submodel.inference import (
         load_priors_from_csv,
         run_joint_inference,
     )
@@ -718,7 +718,7 @@ def process_targets(
     )
 
     # 5. Collect translation sigmas for provenance (max per-entry per target)
-    from qsp_inference.submodel.inference import resolve_per_measurement_sigma
+    from pdac_submodel.submodel.inference import resolve_per_measurement_sigma
 
     translation_sigmas = {}
     for target in targets:

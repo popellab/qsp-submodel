@@ -55,8 +55,16 @@ def _sha256(*chunks: str | bytes) -> str:
 
 
 def _qsp_inference_version() -> str:
+    """The version stamped into every freshness record, and hashed with it.
+
+    Reads ``pdac-submodel`` since the 2026-08-19 detach from ``qsp-inference``.
+    That package is versioned to match what it was cut from, so the value is
+    unchanged across the move and no component goes stale on it.
+
+    The dict key stays ``qsp_inference_version`` -- see :func:`component_inputs`.
+    """
     try:
-        return metadata.version("qsp-inference")
+        return metadata.version("pdac-submodel")
     except metadata.PackageNotFoundError:
         return "unknown"
 
@@ -245,6 +253,10 @@ def compute_component_freshness(
     version = _qsp_inference_version()
 
     inputs = {
+        # NOT renamed with the package. This dict is canonically dumped into the
+        # component's content_hash, so the KEY is stored data: renaming it moves
+        # every hash and marks all 125 components in submodel_priors.yaml stale,
+        # which is a full MCMC rebuild to recover a cosmetic name.
         "qsp_inference_version": version,
         "target_yamls": target_yaml_hashes,
         "prior_rows": prior_row_hashes,
@@ -357,12 +369,12 @@ def compute_live_components_freshness(
     """
     # Local imports to avoid a circular import at module load time
     # (comparison.py imports this module).
-    from qsp_inference.submodel.comparison import (
+    from pdac_submodel.submodel.comparison import (
         _compute_hash,
         _find_components_lightweight,
         _lightweight_parse,
     )
-    from qsp_inference.submodel.parameter_groups import load_parameter_groups
+    from pdac_submodel.submodel.parameter_groups import load_parameter_groups
 
     submodel_dir = Path(submodel_dir)
     priors_csv = Path(priors_csv)

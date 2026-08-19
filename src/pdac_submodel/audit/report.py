@@ -13,8 +13,8 @@ Auto-detects available data and reports:
   posterior samples.
 
 Usage:
-    python -m qsp_inference.audit.report --project-root /path/to/project
-    python -m qsp_inference.audit.report --project-root . --output report.md
+    python -m pdac_submodel.audit.report --project-root /path/to/project
+    python -m pdac_submodel.audit.report --project-root . --output report.md
 """
 
 import argparse
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from qsp_inference.audit.plots import plot_inference_dag, plot_marginals, plot_ppc_histograms
+from pdac_submodel.audit.plots import plot_inference_dag, plot_marginals, plot_ppc_histograms
 
 
 @dataclass
@@ -1985,7 +1985,7 @@ def _marginals_and_copula(
     """
     import numpy as np
 
-    from qsp_inference.submodel.parameterizer import (
+    from pdac_submodel.submodel.parameterizer import (
         empirical_log_grid,
         rank_gaussian_copula,
         threshold_copula,
@@ -2130,7 +2130,7 @@ def _write_submodel_priors(
         output_path: Where to write submodel_priors.yaml
         copula_threshold: Minimum |correlation| to include in copula
     """
-    from qsp_inference.submodel.parameterizer import (
+    from pdac_submodel.submodel.parameterizer import (
         split_grids_to_sidecar,
         write_priors_yaml,
     )
@@ -2148,7 +2148,7 @@ def _write_submodel_priors(
     param_names = [p["name"] for p in parameters]
 
     metadata: dict = {
-        "generated_by": "qsp_inference.audit.report",
+        "generated_by": "pdac_submodel.audit.report",
         "n_parameters": len(param_names),
         "n_samples": n_samples,
     }
@@ -2207,7 +2207,7 @@ def _write_submodel_priors(
 
 def _run_inference(config: AuditConfig, invalidate_params=None, run_population_pass=False):
     """Run component-wise inference to generate/update cached results."""
-    from qsp_inference.submodel.comparison import run_comparison
+    from pdac_submodel.submodel.comparison import run_comparison
 
     if invalidate_params:
         print(f"Invalidating components containing: {invalidate_params}")

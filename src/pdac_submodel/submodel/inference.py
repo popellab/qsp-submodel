@@ -10,7 +10,7 @@ Shared parameters (same name across targets) are sampled once and reused.
 
 Usage::
 
-    from qsp_inference.submodel.inference import run_joint_inference, load_priors_from_csv
+    from pdac_submodel.submodel.inference import run_joint_inference, load_priors_from_csv
 
     prior_specs = load_priors_from_csv("pdac_priors.csv")
     targets = [SubmodelTarget(**yaml.safe_load(p.read_text())) for p in yaml_paths]
@@ -28,13 +28,13 @@ from typing import Optional
 
 import numpy as np
 
-from qsp_inference.submodel.parameter_groups import ParameterGroupsConfig
+from pdac_submodel.submodel.parameter_groups import ParameterGroupsConfig
 from maple.core.calibration.submodel_target import SubmodelTarget
-from qsp_inference.submodel.utils import (
+from pdac_submodel.submodel.utils import (
     STRUCTURED_ALGEBRAIC_TYPES,
     _evaluate_structured_model,
 )
-from qsp_inference.submodel.prior import (
+from pdac_submodel.submodel.prior import (
     DistFit,
     compute_translation_sigma,
     fit_distributions,
@@ -388,7 +388,7 @@ def _resolve_role(role, param_values, inputs_dict, reference_db):
     For InputRef/ReferenceRef/numeric literals, returns a plain float.
     Reuses the logic from submodel_utils._resolve_parameter_role.
     """
-    from qsp_inference.submodel.utils import _resolve_parameter_role
+    from pdac_submodel.submodel.utils import _resolve_parameter_role
 
     return _resolve_parameter_role(role, param_values, inputs_dict, reference_db)
 

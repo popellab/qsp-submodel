@@ -157,12 +157,12 @@ def plot_inference_dag(
     import graphviz
     import yaml as _yaml
 
-    from qsp_inference.submodel.comparison import (
+    from pdac_submodel.submodel.comparison import (
         _build_stage_dag,
         _find_components_lightweight,
         _lightweight_parse,
     )
-    from qsp_inference.submodel.parameter_groups import load_parameter_groups
+    from pdac_submodel.submodel.parameter_groups import load_parameter_groups
 
     param_groups = load_parameter_groups(submodel_dir / "submodel_config.yaml")
 

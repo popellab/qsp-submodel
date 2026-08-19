@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from qsp_inference.submodel.ppc_audit import ComponentPPC, load_components
+from pdac_submodel.submodel.ppc_audit import ComponentPPC, load_components
 
 DEFAULT_GLOB = "*_deriv*.yaml"
 
@@ -137,7 +137,7 @@ def fit_isolated(
     **kwargs,
 ) -> list[ComponentPPC]:
     """Fit every target in ``target_dir`` from a cold cache and read it back."""
-    from qsp_inference.submodel.comparison import run_comparison
+    from pdac_submodel.submodel.comparison import run_comparison
 
     target_dir = Path(target_dir)
     run_comparison(

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdac-submodel"
+# Matches the qsp-inference version this was cut from, and it must keep
+# matching until a rebuild is wanted for its own sake: the version string is
+# hashed into every component's content_hash in submodel_priors.yaml, so
+# bumping it marks all 125 components stale. See submodel/freshness.py.
+version = "0.1.0"
+description = "Submodel MCMC calibration and parameter audit for the PDAC QSP model"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Joel Eliason", email = "jeliaso2@jh.edu"}]
+
+dependencies = [
+    # PyPI, pinned by version rather than the `@ git+https://` form this
+    # carried inside qsp-inference. A direct-URL dependency is not resolvable
+    # by a plain `pip install`, and 0.8.0 is verified to export the three names
+    # this package imports: SubmodelTarget, InputRef, ReferenceRef.
+    "maple-qsp>=0.8.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "pandas>=2.0.0",
+    "pyyaml>=6.0",
+    "ruamel.yaml>=0.17",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# The MCMC/SVI path. submodel/inference.py is the only module that imports any
+# of these, so a caller that only reads submodel_priors.yaml needs none of them.
+fit = ["numpyro>=0.15", "jax>=0.4", "jaxlib>=0.4", "diffrax>=0.6"]
+# The NPE path, also confined to submodel/inference.py.
+npe = ["torch>=1.9", "sbi>=0.19"]
+# audit/plots.py only.
+plots = ["matplotlib>=3.4", "graphviz>=0.20"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
