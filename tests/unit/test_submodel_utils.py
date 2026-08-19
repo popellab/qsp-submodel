@@ -14,7 +14,7 @@ import math
 import pytest
 from unittest.mock import Mock
 
-from qsp_inference.submodel.utils import (
+from qsp_submodel.submodel.utils import (
     get_prior_median,
     build_ode_function,
     solve_submodel,

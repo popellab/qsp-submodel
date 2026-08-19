@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 import yaml
 
-from qsp_inference.audit.report import (
+from qsp_submodel.submodel.aggregate import (
     _write_submodel_priors,
     load_joint_samples,
     load_joint_samples_by_component,

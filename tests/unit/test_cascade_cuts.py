@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from qsp_inference.submodel.parameter_groups import (
+from qsp_submodel.submodel.parameter_groups import (
     CascadeCut,
 )
 
@@ -15,7 +15,7 @@ from qsp_inference.submodel.parameter_groups import (
 
 def test_find_components_excludes_cascade_params():
     """Cascade cut param should split a mega-component into two."""
-    from qsp_inference.submodel.comparison import (
+    from qsp_submodel.submodel.comparison import (
         _find_components_lightweight,
     )
 
@@ -56,7 +56,7 @@ def test_find_components_excludes_cascade_params():
 
 def test_cascade_param_appears_in_multiple_components():
     """The cascade cut param should appear in both resulting components."""
-    from qsp_inference.submodel.comparison import (
+    from qsp_submodel.submodel.comparison import (
         _find_components_lightweight,
     )
 
@@ -82,7 +82,7 @@ def test_cascade_param_appears_in_multiple_components():
 
 def test_build_stage_dag_simple():
     """Two components with one cascade cut → 2 stages."""
-    from qsp_inference.submodel.comparison import _build_stage_dag
+    from qsp_submodel.submodel.comparison import _build_stage_dag
 
     components = [
         {"params": {"P", "X"}, "target_filenames": ["A.yaml"]},
@@ -105,7 +105,7 @@ def test_build_stage_dag_simple():
 
 def test_build_stage_dag_multihop():
     """A→B→C chain via two cascade cuts → 3 stages."""
-    from qsp_inference.submodel.comparison import _build_stage_dag
+    from qsp_submodel.submodel.comparison import _build_stage_dag
 
     components = [
         {"params": {"P1", "X"}, "target_filenames": ["A.yaml"]},
@@ -132,7 +132,7 @@ def test_build_stage_dag_multihop():
 
 def test_build_stage_dag_no_cuts():
     """No cascade cuts → all components in one stage."""
-    from qsp_inference.submodel.comparison import _build_stage_dag
+    from qsp_submodel.submodel.comparison import _build_stage_dag
 
     components = [
         {"params": {"X"}, "target_filenames": ["A.yaml"]},
@@ -148,7 +148,7 @@ def test_build_stage_dag_no_cuts():
 
 def test_build_stage_dag_cycle_detection():
     """Circular cascade cuts should raise ValueError."""
-    from qsp_inference.submodel.comparison import _build_stage_dag
+    from qsp_submodel.submodel.comparison import _build_stage_dag
 
     # A depends on B via P1, B depends on A via P2 → cycle
     components = [
@@ -170,7 +170,7 @@ def test_build_stage_dag_cycle_detection():
 
 def test_build_stage_dag_missing_upstream_target():
     """Upstream target not found should raise ValueError."""
-    from qsp_inference.submodel.comparison import _build_stage_dag
+    from qsp_submodel.submodel.comparison import _build_stage_dag
 
     components = [
         {"params": {"P", "X"}, "target_filenames": ["A.yaml"]},
@@ -191,8 +191,8 @@ def test_build_stage_dag_missing_upstream_target():
 
 def test_posterior_to_prior_spec_lognormal():
     """Lognormal samples should convert to lognormal PriorSpec."""
-    from qsp_inference.submodel.comparison import _posterior_to_prior_spec
-    from qsp_inference.submodel.inference import PriorSpec
+    from qsp_submodel.submodel.comparison import _posterior_to_prior_spec
+    from qsp_submodel.submodel.inference import PriorSpec
 
     rng = np.random.default_rng(42)
     true_mu, true_sigma = -3.0, 0.5
@@ -212,8 +212,8 @@ def test_posterior_to_prior_spec_lognormal():
 
 def test_posterior_to_prior_spec_floor():
     """Very tight samples should still have sigma >= 0.01."""
-    from qsp_inference.submodel.comparison import _posterior_to_prior_spec
-    from qsp_inference.submodel.inference import PriorSpec
+    from qsp_submodel.submodel.comparison import _posterior_to_prior_spec
+    from qsp_submodel.submodel.inference import PriorSpec
 
     # Nearly constant samples
     samples = np.full(1000, 0.05) + np.random.default_rng(0).normal(0, 1e-10, 1000)
@@ -234,7 +234,7 @@ def test_cleanup_orphaned_caches(tmp_path):
     """Orphaned cache files (from old component structure) should be deleted."""
     import json
 
-    from qsp_inference.submodel.comparison import (
+    from qsp_submodel.submodel.comparison import (
         _cleanup_orphaned_caches,
         _compute_hash,
     )
@@ -280,7 +280,7 @@ def test_cleanup_orphaned_caches(tmp_path):
 
 def test_orphan_target_rescued_when_all_params_cascade_cut():
     """A target whose QSP params are ALL cascade-cut should still appear in a component."""
-    from qsp_inference.submodel.comparison import _find_components_lightweight
+    from qsp_submodel.submodel.comparison import _find_components_lightweight
 
     # Target D has only cascade-cut params — BFS never starts from them
     lightweight = [
@@ -301,7 +301,7 @@ def test_orphan_target_rescued_when_all_params_cascade_cut():
 
 def test_orphan_rescue_does_not_duplicate_assigned_targets():
     """Targets already assigned via BFS should not get a second component."""
-    from qsp_inference.submodel.comparison import _find_components_lightweight
+    from qsp_submodel.submodel.comparison import _find_components_lightweight
 
     lightweight = [
         {"target_id": "A", "qsp_params": {"P", "X"}, "filename": "A.yaml"},
@@ -325,7 +325,7 @@ def test_orphan_rescue_does_not_duplicate_assigned_targets():
 
 def test_dag_with_two_cascade_cuts_same_edge():
     """Two cascade cuts creating the same upstream→downstream edge should not cause a false cycle."""
-    from qsp_inference.submodel.comparison import (
+    from qsp_submodel.submodel.comparison import (
         _build_stage_dag,
         _find_components_lightweight,
     )

@@ -465,7 +465,7 @@ class TestProcessYaml:
     """Test process_yaml (single-target MCMC, used by MCP validation)."""
 
     def test_single_param_returns_expected_keys(self, tmp_path):
-        from qsp_inference.submodel.prior import process_yaml
+        from qsp_submodel.submodel.prior import process_yaml
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -499,7 +499,7 @@ class TestProcessYaml:
         assert 0.0005 < result["median_prior"] < 0.05
 
     def test_format_report_works(self, tmp_path):
-        from qsp_inference.submodel.prior import format_report, process_yaml
+        from qsp_submodel.submodel.prior import format_report, process_yaml
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -511,7 +511,7 @@ class TestProcessYaml:
         assert "lognormal" in report.lower() or "gamma" in report.lower()
 
     def test_missing_prior_returns_error(self, tmp_path):
-        from qsp_inference.submodel.prior import process_yaml
+        from qsp_submodel.submodel.prior import process_yaml
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         # CSV missing EC50_test
@@ -526,7 +526,7 @@ class TestProcessYaml:
         assert "not found in priors CSV" in results[0]["error"]
 
     def test_multi_param_hill(self, tmp_path):
-        from qsp_inference.submodel.prior import process_yaml
+        from qsp_submodel.submodel.prior import process_yaml
 
         (tmp_path / "hill.yaml").write_text(HILL_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -545,7 +545,7 @@ class TestSingleParameterIdentity:
     """Test case 1: EC50 with identity forward model."""
 
     def test_posterior_near_data(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -575,7 +575,7 @@ class TestMultiParameterHill:
     """Test case 2: Two-parameter Hill function."""
 
     def test_both_params_estimated(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "hill.yaml").write_text(HILL_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -605,7 +605,7 @@ class TestSharedParameter:
     """Test case 3: Same parameter constrained by two targets."""
 
     def test_shared_param_sampled_once(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "target_a.yaml").write_text(SHARED_TARGET_A)
         (tmp_path / "target_b.yaml").write_text(SHARED_TARGET_B)
@@ -633,7 +633,7 @@ class TestSharedParameter:
 
     def test_shared_tighter_than_single(self, tmp_path):
         """Two targets constraining the same param should give tighter posterior."""
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "target_a.yaml").write_text(SHARED_TARGET_A)
         (tmp_path / "target_b.yaml").write_text(SHARED_TARGET_B)
@@ -671,13 +671,13 @@ class TestAnalyticalPosterior:
         import jax
         from numpyro.infer import MCMC, NUTS
 
-        from qsp_inference.submodel.inference import (
+        from qsp_submodel.submodel.inference import (
             ErrorModelEntry,
             PriorSpec,
             TargetLikelihood,
             submodel_joint_model,
         )
-        from qsp_inference.submodel.prior import DistFit
+        from qsp_submodel.submodel.prior import DistFit
 
         mu_0, sig_0 = 0.0, 0.5
         obs_value = 2.0
@@ -744,7 +744,7 @@ class TestOutputArtifacts:
     def test_yaml_roundtrip(self, tmp_path):
         from ruamel.yaml import YAML
 
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -774,7 +774,7 @@ class TestOutputArtifacts:
     def test_csv_export(self, tmp_path):
         import pandas as pd
 
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "ec50.yaml").write_text(EC50_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -1059,7 +1059,7 @@ class TestExponentialGrowthODE:
     """Test case 5: Exponential growth ODE with analytical solution."""
 
     def test_posterior_near_true_rate(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "growth.yaml").write_text(EXP_GROWTH_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -1085,7 +1085,7 @@ class TestCustomODE:
     """Test case 6: Custom ODE with diffrax and custom observable."""
 
     def test_two_param_custom_ode(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "custom_ode.yaml").write_text(CUSTOM_ODE_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -1108,7 +1108,7 @@ class TestCustomODE:
         """Verify the custom ODE forward function produces sensible predictions."""
         import yaml
 
-        from qsp_inference.submodel.inference import _build_forward_fns
+        from qsp_submodel.submodel.inference import _build_forward_fns
         from maple.core.calibration.submodel_target import SubmodelTarget
 
         target = SubmodelTarget(**yaml.safe_load(CUSTOM_ODE_YAML))
@@ -1305,7 +1305,7 @@ class TestNuisanceParameter:
     """Test case 7: Nuisance parameter excluded from output."""
 
     def test_nuisance_excluded_from_output(self, tmp_path):
-        from qsp_inference.submodel.prior import process_targets
+        from qsp_submodel.submodel.prior import process_targets
 
         (tmp_path / "nuisance.yaml").write_text(NUISANCE_YAML)
         (tmp_path / "priors.csv").write_text(PRIORS_CSV)
@@ -1337,7 +1337,7 @@ class TestNuisanceParameter:
 
     def test_nuisance_not_in_csv_ok(self, tmp_path):
         """Nuisance params should not require an entry in the priors CSV."""
-        from qsp_inference.submodel.prior import process_yaml
+        from qsp_submodel.submodel.prior import process_yaml
 
         (tmp_path / "nuisance.yaml").write_text(NUISANCE_YAML)
         # CSV has k_activate but NOT k_prolif — that's fine since k_prolif is nuisance

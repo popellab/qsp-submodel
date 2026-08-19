@@ -1,4 +1,4 @@
-"""Tests for qsp_inference.submodel.inference."""
+"""Tests for qsp_submodel.submodel.inference."""
 
 import tempfile
 from pathlib import Path
@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from qsp_inference.submodel.inference import (
+from qsp_submodel.submodel.inference import (
     ErrorModelEntry,
     PriorSpec,
     TargetLikelihood,
@@ -15,7 +15,7 @@ from qsp_inference.submodel.inference import (
     build_target_likelihoods,
     load_priors_from_csv,
 )
-from qsp_inference.submodel.prior import DistFit
+from qsp_submodel.submodel.prior import DistFit
 
 try:
     import jax  # noqa: F401
@@ -261,7 +261,7 @@ class TestBuildForwardFns:
     def test_algebraic_forward_fn(self):
         import warnings
 
-        from qsp_inference.submodel.inference import _build_forward_fns
+        from qsp_submodel.submodel.inference import _build_forward_fns
         from maple.core.calibration.submodel_target import SubmodelTarget
 
         data = _make_algebraic_target()
@@ -279,7 +279,7 @@ class TestBuildForwardFns:
     def test_algebraic_forward_fn_log_transform(self):
         import warnings
 
-        from qsp_inference.submodel.inference import _build_forward_fns
+        from qsp_submodel.submodel.inference import _build_forward_fns
         from maple.core.calibration.submodel_target import SubmodelTarget
 
         code = "def compute(params, inputs):\n" "    return np.log(2) / params['k_test']\n"
@@ -297,7 +297,7 @@ class TestBuildForwardFns:
 
         from unittest.mock import MagicMock
 
-        from qsp_inference.submodel.inference import _build_forward_fns
+        from qsp_submodel.submodel.inference import _build_forward_fns
 
         target = MagicMock()
         target.calibration.forward_model.type = "totally_unknown_type"
@@ -405,10 +405,10 @@ class TestResolvePerMeasurementSigma:
 
     def test_single_source_all_inputs(self):
         """All inputs from primary → sigma equals primary's translation sigma."""
-        from qsp_inference.submodel.inference import (
+        from qsp_submodel.submodel.inference import (
             resolve_per_measurement_sigma,
         )
-        from qsp_inference.submodel.prior import compute_translation_sigma
+        from qsp_submodel.submodel.prior import compute_translation_sigma
 
         target = self._make_target()
         primary_sr = target.primary_data_source.source_relevance
@@ -422,10 +422,10 @@ class TestResolvePerMeasurementSigma:
 
     def test_same_source_not_double_counted(self):
         """Two inputs from the same source should count once, not twice."""
-        from qsp_inference.submodel.inference import (
+        from qsp_submodel.submodel.inference import (
             resolve_per_measurement_sigma,
         )
-        from qsp_inference.submodel.prior import compute_translation_sigma
+        from qsp_submodel.submodel.prior import compute_translation_sigma
 
         target = self._make_target()
         primary_sr = target.primary_data_source.source_relevance
@@ -448,11 +448,11 @@ class TestResolvePerMeasurementSigma:
 
         import numpy as np
 
-        from qsp_inference.submodel.inference import (
+        from qsp_submodel.submodel.inference import (
             resolve_per_measurement_sigma,
         )
         from maple.core.calibration.submodel_target import SubmodelTarget
-        from qsp_inference.submodel.prior import compute_translation_sigma
+        from qsp_submodel.submodel.prior import compute_translation_sigma
 
         mouse_sr = {
             **DEFAULT_SOURCE_RELEVANCE,
@@ -500,10 +500,10 @@ class TestResolvePerMeasurementSigma:
 
     def test_no_uses_inputs_falls_back_to_primary(self):
         """Entry with uses_inputs=None falls back to primary source."""
-        from qsp_inference.submodel.inference import (
+        from qsp_submodel.submodel.inference import (
             resolve_per_measurement_sigma,
         )
-        from qsp_inference.submodel.prior import compute_translation_sigma
+        from qsp_submodel.submodel.prior import compute_translation_sigma
 
         target = self._make_target()
         primary_sr = target.primary_data_source.source_relevance
@@ -526,7 +526,7 @@ class TestSubmodelJointModel:
         import jax.random
         from numpyro.infer import MCMC, NUTS
 
-        from qsp_inference.submodel.inference import submodel_joint_model
+        from qsp_submodel.submodel.inference import submodel_joint_model
 
         prior_specs = {
             "k": PriorSpec(name="k", distribution="lognormal", units="1/day", mu=0.0, sigma=1.0)
@@ -587,7 +587,7 @@ class TestSubmodelJointModel:
         import jax.random
         from numpyro.infer import MCMC, NUTS
 
-        from qsp_inference.submodel.inference import submodel_joint_model
+        from qsp_submodel.submodel.inference import submodel_joint_model
 
         prior_specs = {
             "k": PriorSpec(name="k", distribution="lognormal", units="1/day", mu=0.0, sigma=1.0)

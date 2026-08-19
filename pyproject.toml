@@ -43,3 +43,11 @@ dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The integration test runs real NUTS over a custom ODE and takes ~40 s of the
+# suite's 50. It is the only thing that exercises the NPE/MCMC selection end to
+# end, so it is not marked slow and skipped by default -- that selection is what
+# the 2026-08-19 slim nearly cut by mistake.
+

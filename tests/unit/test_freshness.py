@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from qsp_inference.submodel.freshness import (
+from qsp_submodel.submodel.freshness import (
     check_freshness_against_components,
     compute_component_freshness,
     hash_priors_rows,

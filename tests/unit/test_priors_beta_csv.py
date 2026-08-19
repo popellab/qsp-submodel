@@ -1,7 +1,7 @@
 """Regression tests for Beta priors in the CSV-side prior loader.
 
 PR companion: ``feature/beta-prior-csv-inference``. Adds Beta(a, b) support
-to ``qsp_inference.submodel.inference.load_priors_from_csv`` and the
+to ``qsp_submodel.submodel.inference.load_priors_from_csv`` and the
 PriorSpec consumers used by the submodel inference pipeline.
 
 Beta priors entered the CSV path with the stick-breaking simplex
@@ -40,7 +40,7 @@ def _write_priors_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 class TestLoadPriorsFromCsvBeta:
     def test_beta_row_loads_into_prior_spec(self, tmp_path: Path) -> None:
-        from qsp_inference.submodel.inference import load_priors_from_csv
+        from qsp_submodel.submodel.inference import load_priors_from_csv
 
         path = tmp_path / "priors.csv"
         _write_priors_csv(
@@ -80,7 +80,7 @@ class TestLoadPriorsFromCsvBeta:
         )
 
     def test_beta_with_nonpositive_shape_rejected(self, tmp_path: Path) -> None:
-        from qsp_inference.submodel.inference import load_priors_from_csv
+        from qsp_submodel.submodel.inference import load_priors_from_csv
 
         path = tmp_path / "priors.csv"
         _write_priors_csv(
@@ -101,7 +101,7 @@ class TestLoadPriorsFromCsvBeta:
 
     def test_beta_coexists_with_lognormal(self, tmp_path: Path) -> None:
         """Mixed-distribution CSV (beta + lognormal) loads without error."""
-        from qsp_inference.submodel.inference import load_priors_from_csv
+        from qsp_submodel.submodel.inference import load_priors_from_csv
 
         path = tmp_path / "priors.csv"
         _write_priors_csv(
@@ -157,8 +157,8 @@ class TestSampleFromPriorBeta:
     """_sample_from_prior draws a genuine Beta variate for beta priors."""
 
     def test_sample_from_prior_beta_in_unit_interval(self) -> None:
-        from qsp_inference.submodel.comparison import _sample_from_prior
-        from qsp_inference.submodel.inference import PriorSpec
+        from qsp_submodel.submodel.comparison import _sample_from_prior
+        from qsp_submodel.submodel.inference import PriorSpec
 
         spec = PriorSpec(
             name="emax", distribution="beta", units="dimensionless", a=8.0, b=2.0

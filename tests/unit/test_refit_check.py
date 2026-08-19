@@ -2,8 +2,8 @@
 
 import yaml
 
-from qsp_inference.submodel.ppc_audit import ComponentPPC, ObservablePPC
-from qsp_inference.submodel.refit_check import (
+from qsp_submodel.submodel.ppc_audit import ComponentPPC, ObservablePPC
+from qsp_submodel.submodel.refit_check import (
     resolve_target_set,
     score,
     target_index,
