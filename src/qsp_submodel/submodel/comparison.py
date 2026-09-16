@@ -140,6 +140,18 @@ def _sample_from_prior(rng: np.random.Generator, spec: object) -> float:
     )
 
 
+def _prior_median(spec) -> float:
+    """Report the median of the declared distribution, not exp(E[log X])."""
+    if spec.distribution == "beta":
+        from scipy.stats import beta
+        return float(beta.ppf(0.5, spec.a, spec.b))
+    if spec.distribution == "uniform":
+        return float((spec.lower + spec.upper) / 2)
+    if spec.distribution == "normal":
+        return float(spec.mu)
+    return float(np.exp(spec.mu))
+
+
 def _build_structured_results(
     csv_priors: dict,
     joint_fits: dict,
@@ -157,7 +169,7 @@ def _build_structured_results(
         prior_spec = csv_priors.get(pname)
         prior = None
         if prior_spec:
-            median = float(np.exp(prior_spec.mu)) if prior_spec.mu is not None else None
+            median = _prior_median(prior_spec)
             prior = {
                 "median": median,
                 "sigma": float(prior_spec.sigma) if prior_spec.sigma is not None else None,
@@ -626,14 +638,15 @@ def _cleanup_orphaned_caches(cache_dir: Path, active_components: list[dict]) -> 
 def run_comparison(
     priors_csv: str | Path,
     submodel_dir: str | Path,
-    glob_pattern: str = "*_PDAC_deriv*.yaml",
+    glob_pattern: str = "*.yaml",
     num_samples: int = 4000,
     parameter_groups_path: str | Path | None = None,
     invalidate_params: list[str] | None = None,
     base_seed: int = 0,
     run_population_pass: bool = False,
+    target_accept_prob: float = 0.9,
 ) -> str:
-    """Run component-wise NPE inference, return comparison report.
+    """Run component-wise inference, return comparison report.
 
     Args:
         priors_csv: Path to priors CSV.
@@ -655,6 +668,8 @@ def run_comparison(
             full pipeline. Defaults to 0 to match historical behavior
             for a single component, but the per-component derivation
             below still differentiates RNG state across components.
+        target_accept_prob: NUTS target acceptance probability; invalidate cached
+            components explicitly when changing sampler settings.
         run_population_pass: When True, additionally run a second,
             population-scale inference pass (Option A) for every component
             that carries an ``observed_distribution`` feeding population
@@ -701,9 +716,9 @@ def run_comparison(
 
     yaml_files = sorted(submodel_dir.glob(glob_pattern))
     # Exclude submodel_config.yaml from target list
-    yaml_files = [f for f in yaml_files if f.name != "submodel_config.yaml"]
+    yaml_files = [f for f in yaml_files if f.name not in {"submodel_config.yaml", "compare_inference_results.yaml", "submodel_priors.yaml"}]
     if not yaml_files:
-        return f"No YAML files found matching {glob_pattern} in {submodel_dir}"
+        raise ValueError(f"No target YAML files found matching {glob_pattern} in {submodel_dir}")
 
     csv_priors = load_priors_from_csv(priors_csv)
     cache = _cache_dir(submodel_dir)
@@ -716,11 +731,12 @@ def run_comparison(
             raw = yf.read_text()
             yaml_contents[yf.name] = raw
             lt = _lightweight_parse(raw)
-            if lt is not None:
-                lt["filename"] = yf.name
-                lightweight_targets.append(lt)
+            if lt is None or not lt["target_id"] or not lt["qsp_params"]:
+                raise ValueError("Expected a target_id and at least one non-nuisance QSP parameter")
+            lt["filename"] = yf.name
+            lightweight_targets.append(lt)
         except Exception as e:
-            logger.warning("Failed to read %s: %s", yf.name, e)
+            raise ValueError(f"Failed to read target {yf.name}: {e}") from e
 
     all_param_names = set()
     for lt in lightweight_targets:
@@ -857,7 +873,7 @@ def run_comparison(
             target = SubmodelTarget.model_validate(data)
             validated_targets[fname] = target
         except Exception as e:
-            logger.warning("Failed to validate %s: %s", fname, e)
+            raise ValueError(f"Failed to validate target {fname}: {e}") from e
 
     # ── Population pass: force re-run of pop-spread components missing ω samples ──
     # A cached component that feeds population spread but has no
@@ -1048,10 +1064,12 @@ def run_comparison(
                         num_warmup=2000,
                         num_samples=num_samples,
                         num_chains=2,
+                        target_accept_prob=target_accept_prob,
                     )
             except Exception as e:
-                logger.warning("  Component %d failed: %s", ci + 1, e)
-                continue
+                raise RuntimeError(
+                    f"Component {ci + 1} failed ({', '.join(comp['target_filenames'])}): {e}"
+                ) from e
 
             # ── Population-scale pass (Option A) ──
             # Default: population == center (no widening). Only components with
@@ -1081,6 +1099,7 @@ def run_comparison(
                             num_warmup=2000,
                             num_samples=num_samples,
                             num_chains=2,
+                            target_accept_prob=target_accept_prob,
                             population_scale=True,
                         )
                     except Exception as e:
@@ -1310,6 +1329,9 @@ def run_comparison(
                         cascade_priors[param_name].sigma,
                     )
 
+    missing = all_param_names - joint_fits.keys()
+    if missing:
+        raise RuntimeError(f"Incomplete inference; missing parameters: {sorted(missing)}")
     logger.info("Phase 1: done (%d params fitted)", len(joint_fits))
 
     # Single-target results no longer computed separately — NPE handles
@@ -1337,7 +1359,7 @@ def run_comparison(
         "",
         f"**Targets:** {len(lightweight_targets)}",
         f"**Parameters:** {len(all_param_names)}",
-        f"**Method:** Component-wise NPE ({num_samples} posterior samples)",
+        f"**Method:** Component-wise inference (NUTS for algebraic targets; NPE for custom ODEs unless overridden; {num_samples} requested posterior samples)",
         "",
     ]
 
@@ -1349,11 +1371,10 @@ def run_comparison(
         # CSV prior
         if pname in csv_priors:
             spec = csv_priors[pname]
-            csv_median = np.exp(spec.mu)
+            csv_median = _prior_median(spec)
             lines.append(
                 f"**CSV prior:** median={csv_median:.4g}, "
-                f"sigma={spec.sigma:.2f}, "
-                f"CV={np.sqrt(np.exp(spec.sigma**2) - 1):.2f}"
+                f"distribution={spec.distribution}, log-space sigma={spec.sigma:.2f}"
             )
         else:
             lines.append("**CSV prior:** not in CSV")
@@ -1387,7 +1408,7 @@ def run_comparison(
                     f"**{jf['dist']}** |"
                 )
         else:
-            lines.append("No single-target results (parameter only in joint model).")
+            lines.append("Separate single-target fits were not run.")
             if pname in joint_fits:
                 jf = joint_fits[pname]
                 lines.append(
@@ -1414,7 +1435,7 @@ def run_comparison(
         contr_str = "—"
 
         if pname in csv_priors:
-            csv_median = np.exp(csv_priors[pname].mu)
+            csv_median = _prior_median(csv_priors[pname])
             csv_med_str = f"{csv_median:.4g}"
 
         if pname in joint_fits:
@@ -1453,7 +1474,7 @@ def run_comparison(
                 lines.append(f"  - {e['target_id']}: {e['median']:.4g}")
 
     if not any_disagreement:
-        lines.append("None — all multi-target parameters are consistent (<3x spread).")
+        lines.append("Not assessed — separate single-target fits were not run.")
 
     # ── Joint MCMC diagnostics ──
     lines.extend(["", "## Joint MCMC Diagnostics", ""])
@@ -1478,12 +1499,13 @@ def main():
     )
     parser.add_argument("--priors-csv", required=True, help="Path to priors CSV")
     parser.add_argument("--submodel-dir", required=True, help="Directory with SubmodelTarget YAMLs")
-    parser.add_argument("--glob-pattern", default="*_PDAC_deriv*.yaml")
+    parser.add_argument("--glob-pattern", default="*.yaml")
     parser.add_argument("--num-samples", type=int, default=4000)
+    parser.add_argument("--target-accept-prob", type=float, default=0.9)
     parser.add_argument("--output", help="Optional output file (markdown)")
     parser.add_argument(
         "--parameter-groups",
-        help="Path to submodel_config.yaml (auto-discovered in submodel-dir if not set)",
+        help="Path to submodel_config.yaml (omitting it declares no groups or cascade cuts)",
     )
     parser.add_argument(
         "--base-seed",
@@ -1503,6 +1525,7 @@ def main():
         num_samples=args.num_samples,
         parameter_groups_path=args.parameter_groups,
         base_seed=args.base_seed,
+        target_accept_prob=args.target_accept_prob,
     )
 
     if args.output:

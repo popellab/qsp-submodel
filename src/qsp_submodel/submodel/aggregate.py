@@ -118,7 +118,7 @@ def load_priors(path: Path) -> dict:
 def load_submodel_targets(submodel_dir: Path) -> dict:
     """Scan submodel target YAMLs → {param_name: [target_ids]}."""
     coverage = defaultdict(list)
-    for yaml_path in sorted(submodel_dir.glob("*_deriv*.yaml")):
+    for yaml_path in sorted(submodel_dir.glob("*.yaml")):
         try:
             with open(yaml_path) as f:
                 data = yaml.safe_load(f)
