@@ -1305,6 +1305,7 @@ def run_joint_inference(
     num_chains: int = 4,
     seed: int = 0,
     population_scale: bool = False,
+    target_accept_prob: float = 0.9,
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Run joint MCMC inference across all SubmodelTargets.
 
@@ -1317,12 +1318,15 @@ def run_joint_inference(
         num_samples: Post-warmup samples per chain
         num_chains: Number of MCMC chains
         seed: Random seed
+        target_accept_prob: NUTS target acceptance probability in (0, 1).
 
     Returns:
         Tuple of (samples_dict, diagnostics_dict).
         samples_dict: {param_name: np.ndarray} with shape (num_samples * num_chains,)
         diagnostics_dict: {num_divergences, per_param: {name: {r_hat, n_eff, contraction, z_score}}}
     """
+    if not 0 < target_accept_prob < 1:
+        raise ValueError("target_accept_prob must be in (0, 1)")
     try:
         import jax
         import jax.random
@@ -1330,7 +1334,7 @@ def run_joint_inference(
     except ImportError as e:
         raise ImportError(
             "JAX and NumPyro are required for inference. "
-            "Install with: pip install maple[inference]"
+            "Install with: pip install qsp-submodel[fit]"
         ) from e
 
     # Enable persistent compilation cache — first run compiles, subsequent
@@ -1371,7 +1375,7 @@ def run_joint_inference(
     kernel = NUTS(
         submodel_joint_model,
         dense_mass=True,
-        target_accept_prob=0.9,
+        target_accept_prob=target_accept_prob,
         init_strategy=init_to_median,
     )
     print(
